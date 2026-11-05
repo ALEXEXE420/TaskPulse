@@ -1,0 +1,43 @@
+# Bei einem Tag "v1.2.3": TaskPulse bauen und als Release mit TaskPulse-Setup.exe veröffentlichen.
+# Installierte TaskPulse-Versionen holen sich genau diese Datei als Update.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tag und Cargo.toml-Version vergleichen
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} passt nicht zur Version $v in Cargo.toml" }
+
+      - name: Tests
+        run: cargo test
+
+      - name: Bauen
+        run: cargo build --release
+
+      - name: Installer bereitstellen
+        shell: pwsh
+        run: |
+          Copy-Item target/release/TaskPulse.exe TaskPulse-Setup.exe
+          (Get-FileHash TaskPulse-Setup.exe -Algorithm SHA256).Hash.ToLower() + "  TaskPulse-Setup.exe" | Out-File -Encoding ascii TaskPulse-Setup.exe.sha256
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            TaskPulse-Setup.exe
+            TaskPulse-Setup.exe.sha256
+          generate_release_notes: true

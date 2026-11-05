@@ -1,0 +1,19 @@
+# Bei jedem Push: bauen und Tests laufen lassen.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test
+      - name: Release-Build
+        run: cargo build --release

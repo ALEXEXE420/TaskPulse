@@ -1,0 +1,63 @@
+[package]
+name = "taskpulse"
+version = "0.1.6"
+edition = "2021"
+description = "TaskPulse - erweiterter Task-Manager mit GPU-Werten und Taskleisten-Anzeige"
+build = "build.rs"
+# GitHub-Repository für Updates. Auf GitHub gebaute Versionen kennen es automatisch;
+# für lokale Builds OWNER durch den GitHub-Namen ersetzen (oder in den Einstellungen eintragen).
+repository = "https://github.com/OWNER/TaskPulse"
+
+[[bin]]
+name = "TaskPulse"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "=0.29.1"
+egui_extras = "=0.29.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nvml-wrapper = "0.10"
+nvml-wrapper-sys = "=0.8.0"
+
+[dependencies.windows]
+version = "=0.58.0"
+features = [
+  "Foundation_Numerics",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Performance",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
+  "Win32_System_Com",
+  "Win32_System_Console",
+  "Win32_System_ProcessStatus",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
+  "Win32_Networking_WinHttp",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Shell",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Storage_FileSystem",
+]
+
+[build-dependencies]
+embed-manifest = "1.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"
