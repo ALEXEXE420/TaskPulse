@@ -6,6 +6,10 @@ Ein Task-Manager für Windows 10/11, geschrieben in Rust. Er zeigt GPU-Werte pro
 
 ![Taskleisten-Anzeige](docs/taskleiste_dunkel.png)
 
+### ⬇ [TaskPulse-Setup.exe herunterladen](https://github.com/ALEXEXE420/TaskPulse/releases/latest/download/TaskPulse-Setup.exe)
+
+Windows 10 (2004 oder neuer) und Windows 11. Ältere Versionen und Änderungen findest du unter [Releases](https://github.com/ALEXEXE420/TaskPulse/releases).
+
 ## Funktionen
 
 - **Prozesse:** CPU, Arbeitsspeicher, Datenträger, **GPU-Auslastung, GPU-Engine, VRAM und VRAM-Anteil je Prozess**, gruppiert wie im Windows-Task-Manager, mit Farbskala.
@@ -26,7 +30,7 @@ Ein Task-Manager für Windows 10/11, geschrieben in Rust. Er zeigt GPU-Werte pro
 
 ## Installation
 
-1. Unter [Releases](../../releases/latest) die Datei **`TaskPulse-Setup.exe`** herunterladen und starten.
+1. **[TaskPulse-Setup.exe herunterladen](https://github.com/ALEXEXE420/TaskPulse/releases/latest/download/TaskPulse-Setup.exe)** und starten.
 2. Optionen wählen, dann **Installieren** klicken. TaskPulse wird nach `C:\Program Files\TaskPulse` installiert.
 3. Optional [PawnIO](https://pawnio.eu/) installieren. Erst dann zeigt TaskPulse CPU-Temperatur und CPU-Watt an.
 

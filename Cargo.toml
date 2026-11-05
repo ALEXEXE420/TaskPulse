@@ -6,7 +6,7 @@ description = "TaskPulse - erweiterter Task-Manager mit GPU-Werten und Taskleist
 build = "build.rs"
 # GitHub-Repository für Updates. Auf GitHub gebaute Versionen kennen es automatisch;
 # für lokale Builds OWNER durch den GitHub-Namen ersetzen (oder in den Einstellungen eintragen).
-repository = "https://github.com/OWNER/TaskPulse"
+repository = "https://github.com/ALEXEXE420/TaskPulse"
 
 [[bin]]
 name = "TaskPulse"
