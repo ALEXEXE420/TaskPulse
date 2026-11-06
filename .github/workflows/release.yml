@@ -35,8 +35,18 @@ jobs:
           Copy-Item target/release/TaskPulse.exe TaskPulse-Setup.exe
           (Get-FileHash TaskPulse-Setup.exe -Algorithm SHA256).Hash.ToLower() + "  TaskPulse-Setup.exe" | Out-File -Encoding ascii TaskPulse-Setup.exe.sha256
 
+      - name: Änderungen dieser Version aus CHANGELOG.md
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          $text = Get-Content CHANGELOG.md -Raw -Encoding utf8
+          $m = [regex]::Match($text, "(?ms)^## " + [regex]::Escape($v) + "\b[^\r\n]*\r?\n(.*?)(?=^## |\z)")
+          if (-not $m.Success -or -not $m.Groups[1].Value.Trim()) { throw "In CHANGELOG.md fehlt der Abschnitt '## $v'" }
+          "## Was ist neu in $v`n`n" + $m.Groups[1].Value.Trim() | Out-File -Encoding utf8 release_notes.md
+
       - uses: softprops/action-gh-release@v3
         with:
+          body_path: release_notes.md
           files: |
             TaskPulse-Setup.exe
             TaskPulse-Setup.exe.sha256

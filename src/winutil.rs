@@ -17,6 +17,23 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Läuft Windows auf einem ARM-Prozessor (z. B. NVIDIA RTX Spark N1X, Snapdragon X)?
+/// Ein x64-Programm läuft dort in der Emulation (Prism) und sieht per CPUID nur eine
+/// nachgebildete x86-CPU – deshalb hier die echte Architektur des Systems.
+pub fn native_arm64() -> bool {
+    use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE;
+    use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+    static ARM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ARM.get_or_init(|| {
+        if cfg!(target_arch = "aarch64") {
+            return true;
+        }
+        let mut process = IMAGE_FILE_MACHINE::default();
+        let mut native = IMAGE_FILE_MACHINE::default();
+        unsafe { IsWow64Process2(GetCurrentProcess(), &mut process, Some(&mut native)) }.is_ok() && native.0 == 0xAA64
+    })
+}
+
 pub fn is_elevated() -> bool {
     unsafe { IsUserAnAdmin().as_bool() }
 }
@@ -81,6 +98,42 @@ pub fn open_in_explorer(path: &str) {
     let _ = std::process::Command::new("explorer.exe").raw_arg(format!("/select,\"{path}\"")).spawn();
 }
 
+/// Windows-Dialog „Speichern unter“: Ordner und Dateiname frei wählbar.
+/// `filters`: (Beschreibung, Muster), z. B. ("Textdatei", "*.txt"). `None` = abgebrochen.
+/// Blockiert, bis der Dialog geschlossen ist – deshalb in einem eigenen Thread aufrufen.
+pub fn save_file_dialog(title: &str, default_name: &str, start_dir: Option<&std::path::Path>, filters: &[(&str, &str)], default_ext: &str) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{FileSaveDialog, IFileSaveDialog, IShellItem, SHCreateItemFromParsingName, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, SIGDN_FILESYSPATH};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let d: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let names: Vec<(HSTRING, HSTRING)> = filters.iter().map(|(n, p)| (HSTRING::from(*n), HSTRING::from(*p))).collect();
+        let specs: Vec<COMDLG_FILTERSPEC> = names.iter().map(|(n, p)| COMDLG_FILTERSPEC { pszName: PCWSTR(n.as_ptr()), pszSpec: PCWSTR(p.as_ptr()) }).collect();
+        if !specs.is_empty() {
+            let _ = d.SetFileTypes(&specs);
+        }
+        let _ = d.SetTitle(&HSTRING::from(title));
+        let _ = d.SetFileName(&HSTRING::from(default_name));
+        let _ = d.SetDefaultExtension(&HSTRING::from(default_ext));
+        if let Ok(o) = d.GetOptions() {
+            let _ = d.SetOptions(o | FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM);
+        }
+        if let Some(dir) = start_dir.filter(|d| d.is_dir()) {
+            if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(dir.as_os_str()), None) {
+                let _ = d.SetFolder(&item);
+            }
+        }
+        let owner = find_own_window(MAIN_TITLE).unwrap_or_default();
+        d.Show(owner).ok()?; // abgebrochen → Fehler → None
+        let item = d.GetResult().ok()?;
+        let p = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s.map(std::path::PathBuf::from)
+    }
+}
+
 pub fn shell_open(target: &str) {
     unsafe {
         ShellExecuteW(None, w!("open"), &HSTRING::from(target), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
@@ -98,6 +151,20 @@ pub fn search_online(term: &str) {
         })
         .collect();
     shell_open(&format!("https://www.bing.com/search?q={q}"));
+}
+
+/// Beendet diesen Prozess sofort, ohne die Abmelderoutinen der geladenen Bibliotheken.
+///
+/// Grund: Mit Adminrechten ist der PawnIO-Treiber geladen (dazu NVML und die Leistungsindikatoren).
+/// Beim normalen Beenden räumt Windows diese Bibliotheken auf, während noch Messthreads laufen –
+/// das endete bisher in einem Absturz in ntdll (0xC000000D) genau beim Schließen. Alles, was
+/// gespeichert werden muss (Einstellungen), ist zu diesem Zeitpunkt schon geschrieben.
+pub fn fast_exit(code: u32) -> ! {
+    unsafe {
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        let _ = TerminateProcess(GetCurrentProcess(), code);
+    }
+    std::process::exit(code as i32)
 }
 
 pub fn terminate(pid: u32) -> Result<(), String> {
@@ -239,5 +306,41 @@ pub fn trim_working_set() {
     use windows::Win32::System::Threading::GetCurrentProcess;
     unsafe {
         let _ = EmptyWorkingSet(GetCurrentProcess());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "Task beenden": ein echter Prozess wird beendet.
+    #[test]
+    fn terminate_ends_process() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .creation_flags_hidden()
+            .spawn()
+            .expect("Testprozess startet");
+        terminate(child.id()).expect("beenden klappt");
+        let t = std::time::Instant::now();
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(t.elapsed().as_secs() < 5, "Prozess läuft noch");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Ein nicht vorhandener Prozess liefert einen Fehler statt Absturz
+        assert!(terminate(0xFFFF_FFF0).is_err());
+    }
+
+    trait Hidden {
+        fn creation_flags_hidden(&mut self) -> &mut Self;
+    }
+    impl Hidden for std::process::Command {
+        fn creation_flags_hidden(&mut self) -> &mut Self {
+            use std::os::windows::process::CommandExt;
+            self.creation_flags(CREATE_NO_WINDOW)
+        }
     }
 }

@@ -308,6 +308,8 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
     let f = &app.frame;
     let vram_total = f.vram_total.unwrap_or(0.0);
     let mut units = build_units(&f.procs, &f.gpu.per_pid, cfg.group_processes);
+    let sel = selected_unit(app);
+    let mut end_now: Option<Unit> = None;
     let st = &mut app.procs;
 
     // Werkzeugleiste
@@ -351,6 +353,17 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
             ui.checkbox(&mut c.shared_gpu_mem, "Gemeinsamer GPU-Speicher");
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let label = RichText::new("✖ Task beenden").strong();
+            let btn = egui::Button::new(if sel.is_some() { label.color(Color32::WHITE) } else { label });
+            let btn = if sel.is_some() { btn.fill(Color32::from_rgb(196, 43, 28)) } else { btn };
+            let tip = match &sel {
+                Some(u) if u.pids.len() > 1 => format!("„{}“ beenden ({} Prozesse) – Taste Entf", u.name, u.pids.len()),
+                Some(u) => format!("„{}“ beenden – Taste Entf", u.name),
+                None => "Erst einen Prozess in der Liste anklicken".to_string(),
+            };
+            if ui.add_enabled(sel.is_some(), btn).on_hover_text(tip).on_disabled_hover_text("Erst einen Prozess in der Liste anklicken").clicked() {
+                end_now = sel.clone();
+            }
             if ui.button("Neue Aufgabe ausführen …").clicked() {
                 st.confirm = None;
                 app.settings.run_dialog = Some(String::new());
@@ -358,6 +371,10 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
         });
     });
     ui.add_space(4.0);
+    let typing = ui.ctx().memory(|m| m.focused().is_some());
+    if !typing && sel.is_some() && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+        end_now = sel.clone();
+    }
 
     let rank = st.frozen.then_some(&st.frozen_rank);
     sort_units(&mut units, st.sort, st.desc, rank);
@@ -575,6 +592,9 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
         });
     });
 
+    if let Some(u) = end_now {
+        actions.push(Action::End(u));
+    }
     for a in actions {
         apply(app, a);
     }
@@ -686,7 +706,12 @@ fn apply(app: &mut TaskPulseApp, a: Action) {
                 app.procs.collapsed.insert(c);
             }
         }
-        Action::End(u) => request_end(app, u.name.clone(), u.category, u.pids.clone()),
+        Action::End(u) => {
+            request_end(app, u.name.clone(), u.category, u.pids.clone());
+            if app.procs.confirm.is_none() {
+                app.procs.selected = None;
+            }
+        }
         Action::EndTree(u) => {
             let pids = descendants(&app.frame.procs, &u.pids);
             request_end(app, format!("{} (mit {} Unterprozessen)", u.name, pids.len().saturating_sub(u.pids.len())), u.category, pids);

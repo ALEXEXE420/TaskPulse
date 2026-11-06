@@ -20,12 +20,13 @@ pub struct UpdateUi {
     /// Meldung des zuletzt eingespielten Updates
     pub last_result: Option<String>,
     pub banner_hidden: bool,
+    show_notes: bool,
     started: bool,
 }
 
 impl Default for UpdateUi {
     fn default() -> Self {
-        UpdateUi { phase: Arc::new(Mutex::new(Phase::Idle)), last_result: updater::take_last_result(), banner_hidden: false, started: false }
+        UpdateUi { phase: Arc::new(Mutex::new(Phase::Idle)), last_result: updater::take_last_result(), banner_hidden: false, show_notes: false, started: false }
     }
 }
 
@@ -56,7 +57,10 @@ impl UpdateUi {
             let r = match updater::check(&cfg) {
                 Ok(Some(r)) => Phase::Available(r),
                 Ok(None) => Phase::UpToDate,
-                Err(e) => Phase::Error(e),
+                Err(e) => {
+                    crate::diag::log(format!("Update-Prüfung fehlgeschlagen: {e}"));
+                    Phase::Error(e)
+                }
             };
             *p.lock().unwrap() = r;
             ctx.request_repaint();
@@ -70,7 +74,10 @@ impl UpdateUi {
             let res = updater::download(&r).and_then(|f| updater::apply(&f, true));
             *p.lock().unwrap() = match res {
                 Ok(()) => Phase::Working("Update wird installiert – TaskPulse startet gleich neu …".into()),
-                Err(e) => Phase::Error(e),
+                Err(e) => {
+                    crate::diag::log(format!("Update fehlgeschlagen: {e}"));
+                    Phase::Error(e)
+                }
             };
             ctx.request_repaint();
         });
@@ -86,7 +93,14 @@ impl UpdateUi {
         egui::TopBottomPanel::top("update_banner").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Some(msg) = self.last_result.clone() {
-                    ui.colored_label(if msg.starts_with('✔') { GREEN } else { RED }, msg);
+                    let ok = msg.starts_with('✔');
+                    ui.colored_label(if ok { GREEN } else { RED }, msg);
+                    if ok && updater::changelog_for(updater::CURRENT).is_some() {
+                        let label = if self.show_notes { "Was ist neu? ▲" } else { "Was ist neu? ▼" };
+                        if ui.button(label).clicked() {
+                            self.show_notes = !self.show_notes;
+                        }
+                    }
                     if ui.small_button("OK").clicked() {
                         self.last_result = None;
                     }
@@ -104,6 +118,13 @@ impl UpdateUi {
                     }
                 }
             });
+            if self.show_notes && self.last_result.is_some() {
+                if let Some(n) = updater::changelog_for(updater::CURRENT) {
+                    ui.label(RichText::new(format!("Neu in Version {}:", updater::CURRENT)).strong());
+                    ui.label(n.trim_end());
+                    ui.add_space(4.0);
+                }
+            }
         });
     }
 
@@ -170,5 +191,13 @@ impl UpdateUi {
                     .color(ORANGE),
             );
         }
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new("Änderungsprotokoll (was wurde in welcher Version geändert)").id_salt("changelog").default_open(std::env::args().any(|a| a == "--changelog")).show(ui, |ui| {
+            for (head, body) in updater::changelog_sections() {
+                ui.label(RichText::new(head).strong());
+                ui.label(body.trim_end());
+                ui.add_space(6.0);
+            }
+        });
     }
 }

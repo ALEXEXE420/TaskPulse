@@ -1,6 +1,6 @@
 [package]
 name = "taskpulse"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "TaskPulse - erweiterter Task-Manager mit GPU-Werten und Taskleisten-Anzeige"
 build = "build.rs"
@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 eframe = "=0.29.1"
 egui_extras = "=0.29.1"
+egui_plot = "=0.29.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nvml-wrapper = "0.10"
@@ -41,6 +42,7 @@ features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_HiDpi",
   "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
@@ -50,6 +52,11 @@ features = [
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
   "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Diagnostics_Etw",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Kernel",
+  "Win32_System_Time",
 ]
 
 [build-dependencies]
@@ -59,5 +66,5 @@ embed-manifest = "1.4"
 opt-level = 3
 lto = "thin"
 codegen-units = 4
-strip = true
+strip = "debuginfo"
 panic = "abort"

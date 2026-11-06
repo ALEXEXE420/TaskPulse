@@ -265,7 +265,7 @@ mod tests {
     }
 
     fn a(name: &str, ded_gb: f64, vendor: u32) -> DxgiAdapter {
-        DxgiAdapter { index: 0, luid: name.into(), luid_low: 0, luid_high: 0, vendor_id: vendor, name: name.into(), dedicated: ded_gb * 1e9 }
+        DxgiAdapter { luid: name.into(), vendor_id: vendor, name: name.into(), dedicated: ded_gb * 1e9, ..Default::default() }
     }
 
     #[test]
@@ -275,6 +275,20 @@ mod tests {
         let list = vec![a("Radeon RX 7800 XT", 16.0, 0x1002), a("AMD Radeon(TM) Graphics", 0.5, 0x1002)];
         assert_eq!(auto_adapter(&list).unwrap().name, "Radeon RX 7800 XT");
         assert!(auto_adapter(&[]).is_none());
+    }
+
+    #[test]
+    fn board_vendor_and_driver() {
+        let mut x = a("RTX 4070", 12.0, 0x10DE);
+        x.device_id = 0x2786;
+        x.subsys_id = 0x8888_1043;
+        x.revision = 0xA1;
+        x.driver = Some("32.0.15.6094".into());
+        assert_eq!(x.board_vendor(), Some("ASUS"));
+        assert_eq!(x.pci_id(), "10DE:2786 · Subsystem 1043:8888 · Rev A1");
+        assert_eq!(x.driver_display().as_deref(), Some("560.94 (32.0.15.6094)"));
+        assert_eq!(crate::sensors::gpu_proc::nvidia_driver("31.0.15.5222").as_deref(), Some("552.22"));
+        assert_eq!(crate::sensors::gpu_proc::nvidia_driver("x"), None);
     }
 
     #[test]

@@ -9,6 +9,8 @@ pub mod net;
 pub mod nvgpu;
 pub mod pdh;
 pub mod procs;
+pub mod topology;
+pub mod fps;
 
 use crate::config::{Config, CpuFreqMode};
 use crate::format;
@@ -82,12 +84,30 @@ impl BasicSensors {
     }
 }
 
+impl BasicSensors {
+    /// Watt und Spannung je physischem Kern (nur mit PawnIO/Adminrechten; sonst leer).
+    pub fn per_core(&mut self, cores: &[Vec<usize>]) -> Vec<cputemp::CoreReading> {
+        self.temp.as_mut().map(|t| t.per_core(cores)).unwrap_or_default()
+    }
+
+    /// AMD: Temperatur je CCD (nur mit PawnIO).
+    pub fn ccd_temps(&self) -> Vec<f64> {
+        self.temp.as_ref().map(|t| t.ccd_temps()).unwrap_or_default()
+    }
+}
+
 fn open_temp(cfg: &Config) -> (Option<cputemp::CpuTemp>, cputemp::TempStatus) {
     if !cfg.use_pawnio {
         return (None, cputemp::TempStatus::Disabled);
     }
     match cputemp::CpuTemp::open() {
         Ok(t) => (Some(t), cputemp::TempStatus::Ok),
-        Err(e) => (None, e),
+        Err(e) => {
+            // Fehlende Adminrechte sind normal – nur echte Fehler protokollieren
+            if matches!(e, cputemp::TempStatus::Failed(_)) {
+                crate::diag::log(format!("CPU-Sensoren (PawnIO): {}", e.describe()));
+            }
+            (None, e)
+        }
     }
 }

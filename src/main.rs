@@ -17,6 +17,7 @@
 
 mod autostart;
 mod config;
+mod diag;
 mod format;
 mod installer;
 mod sensors;
@@ -72,9 +73,16 @@ fn dump(path: Option<&str>) {
     top.truncate(15);
     let cells: Vec<String> =
         cfg.taskbar.visible_fields().iter().map(|f| taskbar::layout::cell(*f, &b, &cfg)).map(|c| format!("{}{}", c.text, c.extra.map(|e| format!(" {e}")).unwrap_or_default())).collect();
+    let ci = sensors::cputemp::cpu_info();
+    let cpu_groups: Vec<serde_json::Value> = sensors::topology::groups(&sensors::topology::query(), ci.vendor.contains("AMD") && !winutil::native_arm64(), ci.family)
+        .iter()
+        .map(|g| serde_json::json!({"title": g.title, "detail": g.detail, "lps": g.lps}))
+        .collect();
     let v = serde_json::json!({
         "elevated": winutil::is_elevated(),
         "cpu_brand": sensors::cputemp::cpu_info().brand,
+        "arm64": winutil::native_arm64(),
+        "cpu_groups": cpu_groups,
         "basic": b,
         "taskbar_text": cells,
         "disk": d,
@@ -102,7 +110,15 @@ fn launch_args_file() -> std::path::PathBuf {
 }
 
 fn main() {
+    // Fehlerberichte bei Programmfehlern und Abstürzen (Ordner %APPDATA%\TaskPulse\Fehlerberichte)
+    diag::install_handlers();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--test-fehler") {
+        // Test: absichtlicher Programmfehler – muss einen Fehlerbericht erzeugen
+        diag::log("Test-Fehler ausgelöst (--test-fehler)");
+        let v: Vec<u32> = Vec::new();
+        let _ = v[std::hint::black_box(3)];
+    }
     if args.iter().any(|a| a == "--elevated-launch") {
         // Über die Admin-Aufgabe gestartet: ursprüngliche Argumente übernehmen
         let f = launch_args_file();
@@ -144,7 +160,12 @@ page={}
             Err(e) => format!("Fehler: {e}
 "),
         };
-        let _ = std::fs::write(out, s);
+        let _ = std::fs::write(&out, s);
+        // --soak N: danach N Sekunden weiterlaufen (Absturz-Test: Timer von WinHTTP feuern nachträglich)
+        if let Some(n) = value_after("--soak").and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_secs(n));
+            let _ = std::fs::write(format!("{out}.soak"), "überlebt");
+        }
         return;
     }
     if has("--http-test") {
@@ -157,6 +178,28 @@ page={}
 "),
         };
         let _ = std::fs::write(Config::dir().join("http_test.txt"), s);
+        return;
+    }
+    if has("--test-speichern") {
+        // Test: „Speichern unter“-Dialog des Benchmarks öffnen (Bildschirmfoto)
+        let docs = std::env::var_os("USERPROFILE").map(|p| std::path::PathBuf::from(p).join("Documents"));
+        let r = winutil::save_file_dialog(
+            "Benchmark-Log speichern",
+            "TaskPulse-Benchmark-Beispielspiel-2026-11-06_14-03-22.txt",
+            docs.as_deref(),
+            &[("Textdatei (*.txt)", "*.txt"), ("Markdown (*.md)", "*.md"), ("Alle Dateien (*.*)", "*.*")],
+            "txt",
+        );
+        diag::log(format!("Test Speichern-Dialog: {r:?}"));
+        return;
+    }
+    if has("--diagnose") {
+        // Diagnosebericht ohne Hauptfenster erstellen (z. B. wenn TaskPulse nicht mehr startet)
+        if let Some(p) = diag::diagnose("") {
+            if !has("--still") {
+                winutil::open_in_explorer(&p.to_string_lossy());
+            }
+        }
         return;
     }
     if has("--taskbar-info") {
@@ -222,7 +265,7 @@ page={}
     }
     if has("--taskbar") {
         taskbar::run();
-        return;
+        winutil::fast_exit(0);
     }
 
     // Neustart aus dem Fenster heraus: warten, bis das alte Fenster zu ist
@@ -267,9 +310,11 @@ page={}
         match value_after("--page") {
             Some("leistung") | Some("gpu") => Some(ui::Tab::Performance),
             Some("prozesse") => Some(ui::Tab::Processes),
+            Some("benchmark") => Some(ui::Tab::Benchmark),
             Some("einstellungen") => Some(ui::Tab::Settings),
             _ => None,
         }
     };
     let _ = ui::run(page);
+    winutil::fast_exit(0);
 }

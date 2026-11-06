@@ -3,7 +3,7 @@
 
 use super::pdh::{Counter, Query};
 use std::collections::HashMap;
-use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIDevice, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EngineKey {
@@ -77,7 +77,7 @@ pub fn pretty_engtype(t: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DxgiAdapter {
     pub index: usize,
     pub luid: String,
@@ -86,6 +86,13 @@ pub struct DxgiAdapter {
     pub vendor_id: u32,
     pub name: String,
     pub dedicated: f64,
+    /// PCI-Geräte-ID des Grafikchips
+    pub device_id: u32,
+    /// PCI-Subsystem: untere 16 Bit = Hersteller der Karte (ASUS, MSI …), obere = Kartenmodell
+    pub subsys_id: u32,
+    pub revision: u32,
+    /// Treiberversion wie in den Windows-Geräteeigenschaften, z. B. "32.0.15.6094"
+    pub driver: Option<String>,
 }
 
 impl DxgiAdapter {
@@ -98,6 +105,73 @@ impl DxgiAdapter {
             _ => "Unbekannt",
         }
     }
+
+    /// Hersteller der Karte aus der PCI-Subsystem-Kennung (wie in HWiNFO/GPU-Z).
+    pub fn board_vendor(&self) -> Option<&'static str> {
+        board_vendor(self.subsys_id & 0xFFFF)
+    }
+
+    /// "10DE:2C02 · Subsystem 1043:89F4 · Rev A1"
+    pub fn pci_id(&self) -> String {
+        format!("{:04X}:{:04X} · Subsystem {:04X}:{:04X} · Rev {:02X}", self.vendor_id, self.device_id, self.subsys_id & 0xFFFF, self.subsys_id >> 16, self.revision)
+    }
+
+    /// NVIDIA zählt Treiber anders als Windows: 32.0.15.6094 → 560.94
+    pub fn driver_display(&self) -> Option<String> {
+        let d = self.driver.as_ref()?;
+        if self.vendor_id == 0x10DE {
+            if let Some(n) = nvidia_driver(d) {
+                return Some(format!("{n} ({d})"));
+            }
+        }
+        Some(d.clone())
+    }
+}
+
+/// Bekannte Kartenhersteller (PCI-SIG-Herstellerkennungen).
+pub fn board_vendor(id: u32) -> Option<&'static str> {
+    Some(match id {
+        0x1043 => "ASUS",
+        0x1462 => "MSI",
+        0x1458 => "Gigabyte",
+        0x3842 => "EVGA",
+        0x19DA => "Zotac",
+        0x1569 => "Palit",
+        0x10B0 => "Gainward",
+        0x196E => "PNY",
+        0x1DA2 => "Sapphire",
+        0x148C => "PowerColor",
+        0x1682 => "XFX",
+        0x1849 => "ASRock",
+        0x1B4C => "KFA2 / Galax",
+        0x7377 => "Colorful",
+        0x1ACC => "Point of View",
+        0x174B => "PC Partner (Sapphire)",
+        0x1028 => "Dell",
+        0x103C => "HP",
+        0x17AA => "Lenovo",
+        0x1025 => "Acer",
+        0x1D05 => "Tongfang",
+        0x1558 => "Clevo",
+        0x152D => "Quanta",
+        0x10DE => "NVIDIA (Founders Edition)",
+        0x1002 => "AMD (Referenzdesign)",
+        0x8086 => "Intel",
+        0x1EAE => "XFX",
+        0x16F3 => "Inno3D",
+        0x1B0A => "Biostar",
+        _ => return None,
+    })
+}
+
+/// Windows-Treiberversion "a.b.c.dddd" → NVIDIA-Zählung: letzte Stelle von c + d → "560.94".
+pub fn nvidia_driver(win: &str) -> Option<String> {
+    let p: Vec<&str> = win.split('.').collect();
+    if p.len() != 4 {
+        return None;
+    }
+    let digits = format!("{}{:0>4}", p[2].chars().last()?, p[3]);
+    (digits.len() == 5).then(|| format!("{}.{}", &digits[..3], &digits[3..]))
 }
 
 pub fn dxgi_adapters() -> Vec<DxgiAdapter> {
@@ -116,6 +190,11 @@ pub fn dxgi_adapters() -> Vec<DxgiAdapter> {
             if out.iter().any(|x| x.luid == luid) {
                 continue;
             }
+            // Treiberversion: CheckInterfaceSupport(IDXGIDevice) liefert die Version des Benutzermodus-Treibers
+            let driver = a.CheckInterfaceSupport(&<IDXGIDevice as windows::core::Interface>::IID).ok().map(|v| {
+                let v = v as u64;
+                format!("{}.{}.{}.{}", v >> 48, (v >> 32) & 0xFFFF, (v >> 16) & 0xFFFF, v & 0xFFFF)
+            });
             out.push(DxgiAdapter {
                 index: out.len(),
                 luid,
@@ -124,6 +203,10 @@ pub fn dxgi_adapters() -> Vec<DxgiAdapter> {
                 vendor_id: d.VendorId,
                 name,
                 dedicated: d.DedicatedVideoMemory as f64,
+                device_id: d.DeviceId,
+                subsys_id: d.SubSysId,
+                revision: d.Revision,
+                driver,
             });
         }
     }

@@ -70,6 +70,18 @@ pub enum CpuFreqMode {
     Average,
 }
 
+/// Ansicht auf Leistung → CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CpuView {
+    /// Eine Grafik für die ganze CPU
+    #[default]
+    Total,
+    /// Jeder logische Prozessor einzeln
+    Logical,
+    /// CCDs (AMD) bzw. P-/E-Kerne (Intel) zusammengefasst
+    Groups,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GpuMemMode {
     Percent,
@@ -238,6 +250,10 @@ pub struct Config {
     pub always_admin: bool,
     /// LUID der angezeigten Grafikkarte; leer = automatisch (größter Grafikspeicher).
     pub gpu_adapter: String,
+    /// Leistung → CPU: gewählte Ansicht (bleibt gespeichert).
+    pub cpu_view: CpuView,
+    /// Ordner, in dem Benchmark-Logs zuletzt gespeichert wurden (leer = Dokumente).
+    pub bench_dir: String,
     /// Updates von GitHub automatisch suchen und installieren.
     pub auto_update: bool,
     /// GitHub-Repository "Besitzer/Name" für Updates; leer = das eingebaute.
@@ -294,6 +310,8 @@ impl Default for Config {
             ui_font_size: 16.0,
             always_admin: false,
             gpu_adapter: String::new(),
+            cpu_view: CpuView::Total,
+            bench_dir: String::new(),
             auto_update: true,
             update_repo: String::new(),
         }
@@ -320,13 +338,18 @@ impl Config {
 
     pub fn load_from(path: &std::path::Path) -> Config {
         match std::fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str::<Config>(&s).map(|c| c.sanitized()).unwrap_or_default(),
+            // Von Hand (z. B. mit PowerShell) gespeicherte Dateien beginnen oft mit einem BOM
+            Ok(s) => serde_json::from_str::<Config>(s.trim_start_matches('\u{feff}')).map(|c| c.sanitized()).unwrap_or_default(),
             Err(_) => Config::default(),
         }
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        self.save_to(&Self::path())
+        let r = self.save_to(&Self::path());
+        if let Err(e) = &r {
+            crate::diag::log(format!("Einstellungen nicht gespeichert: {e}"));
+        }
+        r
     }
 
     pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
@@ -384,6 +407,19 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_file_with_bom_and_keeps_cpu_view() {
+        let dir = std::env::temp_dir().join(format!("taskpulse_bom_{}", std::process::id()));
+        let p = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = Config::default();
+        c.cpu_view = CpuView::Groups;
+        let json = serde_json::to_string(&c).unwrap();
+        std::fs::write(&p, format!("\u{feff}{json}")).unwrap();
+        assert_eq!(Config::load_from(&p).cpu_view, CpuView::Groups);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn roundtrip() {

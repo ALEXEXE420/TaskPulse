@@ -18,7 +18,13 @@ use std::time::Duration;
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Networking::WinHttp::*;
 
-pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
+/// Laufende Version: Release "0.1.7" oder Entwicklerversion "0.1.6.1-Dev" (siehe build.rs).
+pub const CURRENT: &str = env!("TASKPULSE_VERSION");
+
+/// Lokal gebaute Entwicklerversion?
+pub fn is_dev(v: &str) -> bool {
+    v.to_lowercase().ends_with("-dev")
+}
 /// Name der Installer-Datei, die jede Veröffentlichung auf GitHub anhängen muss.
 pub const ASSET_NAME: &str = "TaskPulse-Setup.exe";
 
@@ -250,17 +256,58 @@ pub fn background_thread() {
             let cfg = Config::load();
             let mut wait = Duration::from_secs(12 * 3600);
             if cfg.auto_update && running_installed() {
-                if let Ok(Some(r)) = check(&cfg) {
-                    if winutil::find_own_window(winutil::MAIN_TITLE).is_some() {
-                        wait = Duration::from_secs(1800);
-                    } else if let Ok(p) = download(&r) {
-                        let _ = apply(&p, false);
+                match check(&cfg) {
+                    Ok(Some(r)) => {
+                        if winutil::find_own_window(winutil::MAIN_TITLE).is_some() {
+                            wait = Duration::from_secs(1800);
+                        } else {
+                            match download(&r).and_then(|p| apply(&p, false)) {
+                                Ok(()) => crate::diag::log(format!("Update auf {} gestartet", r.version)),
+                                Err(e) => crate::diag::log(format!("Automatisches Update auf {} fehlgeschlagen: {e}", r.version)),
+                            }
+                        }
                     }
+                    Ok(None) => {}
+                    Err(e) => crate::diag::log(format!("Update-Prüfung fehlgeschlagen: {e}")),
                 }
             }
             std::thread::sleep(wait);
         }
     });
+}
+
+/// Änderungsprotokoll, in die EXE eingebaut (CHANGELOG.md).
+pub const CHANGELOG: &str = include_str!("../CHANGELOG.md");
+
+/// Abschnitte des Änderungsprotokolls: (Überschrift, Punkte). Leere Abschnitte fallen weg.
+pub fn changelog_sections() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in CHANGELOG.lines() {
+        if let Some(h) = line.strip_prefix("## ") {
+            out.push((h.trim().to_string(), String::new()));
+        } else if let Some((_, body)) = out.last_mut() {
+            if !line.trim().is_empty() {
+                let l = line.trim_end();
+                // Markdown-Aufzählung als Punkt anzeigen
+                match l.strip_prefix("- ") {
+                    Some(rest) => {
+                        body.push_str("• ");
+                        body.push_str(rest);
+                    }
+                    None => body.push_str(l),
+                }
+                body.push('\n');
+            }
+        }
+    }
+    out.retain(|(_, b)| !b.trim().is_empty());
+    out
+}
+
+/// Punkte einer Version, z. B. "0.1.6". Für Entwicklerversionen der Abschnitt „Unveröffentlicht“.
+pub fn changelog_for(version: &str) -> Option<String> {
+    let version = if is_dev(version) { "Unveröffentlicht" } else { version };
+    changelog_sections().into_iter().find(|(h, _)| h == version || h.starts_with(&format!("{version} "))).map(|(_, b)| b)
 }
 
 /// Ergebnis des letzten Updates (vom Installer geschrieben), einmalig abholen.
@@ -290,6 +337,12 @@ mod tests {
         assert!(!is_newer("v0.1.5", "0.1.5"));
         assert!(!is_newer("0.1.4", "0.1.5"));
         assert!(!is_newer("0.1.5-beta", "0.1.5"));
+        // Entwicklerversion 0.1.6.1-Dev: das Release 0.1.6 ist nicht neuer, 0.1.7 schon
+        assert!(!is_newer("0.1.6", "0.1.6.1-Dev"));
+        assert!(is_newer("0.1.7", "0.1.6.1-Dev"));
+        assert!(is_newer("0.1.6.2-Dev", "0.1.6.1-Dev"));
+        assert!(is_dev("0.1.6.1-Dev"));
+        assert!(!is_dev("0.1.7"));
     }
 
     #[test]
@@ -301,6 +354,18 @@ mod tests {
         assert_eq!(repo_from_url("max"), None);
         assert_eq!(repo_from_url("https://github.com/OWNER/TaskPulse"), None);
         assert_eq!(repo_from_url("a/b/c"), None);
+    }
+
+    #[test]
+    fn changelog_has_released_versions() {
+        let s = changelog_sections();
+        assert!(s.iter().any(|(h, _)| h.starts_with("0.1.6")));
+        assert!(changelog_for("0.1.6").unwrap().contains("CPU RAM"));
+        // Entwicklerversion zeigt, was seit dem letzten Release dazukam
+        assert_eq!(changelog_for("0.1.6.3-Dev"), changelog_for("Unveröffentlicht"));
+        assert!(changelog_for("0.1").is_none());
+        // Jede Version, die gebaut wird, braucht einen Eintrag (sonst bricht auch der Release-Bau ab)
+        assert!(changelog_for(CURRENT).is_some() || s.iter().any(|(h, _)| h.starts_with("Unveröffentlicht")));
     }
 
     #[test]

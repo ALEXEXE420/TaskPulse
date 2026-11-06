@@ -20,7 +20,7 @@ use windows::Win32::System::Registry::*;
 use windows::Win32::UI::Shell::{FOLDERID_CommonPrograms, FOLDERID_Desktop, IShellLinkW, SHGetKnownFolderPath, ShellLink, KF_FLAG_DEFAULT};
 
 pub const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\TaskPulse";
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = crate::updater::CURRENT;
 
 /// Soll diese EXE als Installer laufen?
 pub fn is_setup_exe() -> bool {
@@ -448,7 +448,10 @@ pub fn run_update(reopen: bool) {
     };
     match &r {
         Ok(_) => crate::updater::write_result(&format!("✔ TaskPulse wurde auf Version {VERSION} aktualisiert.")),
-        Err(e) => crate::updater::write_result(&format!("Update auf Version {VERSION} fehlgeschlagen: {e}")),
+        Err(e) => {
+            crate::diag::log(format!("Update-Installation fehlgeschlagen: {e}"));
+            crate::updater::write_result(&format!("Update auf Version {VERSION} fehlgeschlagen: {e}"))
+        }
     }
     if let Ok(exe) = r {
         let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();

@@ -8,12 +8,14 @@ Ein Task-Manager für Windows 10/11, geschrieben in Rust. Er zeigt GPU-Werte pro
 
 ### ⬇ [TaskPulse-Setup.exe herunterladen](https://github.com/ALEXEXE420/TaskPulse/releases/latest/download/TaskPulse-Setup.exe)
 
-Windows 10 (2004 oder neuer) und Windows 11. Ältere Versionen und Änderungen findest du unter [Releases](https://github.com/ALEXEXE420/TaskPulse/releases).
+Windows 10 (2004 oder neuer) und Windows 11. Was sich in welcher Version geändert hat, steht im [Änderungsprotokoll](CHANGELOG.md) und bei jedem [Release](https://github.com/ALEXEXE420/TaskPulse/releases).
 
 ## Funktionen
 
-- **Prozesse:** CPU, Arbeitsspeicher, Datenträger, **GPU-Auslastung, GPU-Engine, VRAM und VRAM-Anteil je Prozess**, gruppiert wie im Windows-Task-Manager, mit Farbskala.
-- **Leistung:** Verlaufsgrafiken für CPU (auch je Kern), Arbeitsspeicher, Datenträger, Netzwerk und GPU (alle Engines).
+- **Prozesse:** CPU, Arbeitsspeicher, Datenträger, **GPU-Auslastung, GPU-Engine, VRAM und VRAM-Anteil je Prozess**, gruppiert wie im Windows-Task-Manager, mit Farbskala. „Task beenden“ per Knopf oder Entf.
+- **Leistung:** Verlaufsgrafiken für CPU, Arbeitsspeicher, jeden Datenträger einzeln, Netzwerk und GPU (alle Engines, Kartenhersteller, Treiber).
+  - **CPU-Aufbau:** logische Prozessoren nach **CCD** (AMD Ryzen, Threadripper, EPYC) bzw. **P-, E- und LP-E-Kernen** (Intel), je Kern Takt, Auslastung, Watt, Spannung und Temperatur.
+- **Benchmark:** Aufzeichnung im Sekundentakt mit Graphen für **FPS, Frametimes, 1 % und 0,1 % Low, Ruckler**, Temperaturen, Takt, Auslastung und Watt. FPS über die Windows-Grafik-Ereignisse (wie PresentMon) – ohne sich ins Spiel einzuklinken. Export als Log (für KI/Excel) und CSV.
 - **Taskleisten-Anzeige**, die auch ohne Hauptfenster läuft:
   - Upload und Download, auf Wunsch mit Auslastung der Leitung in %
   - CPU-Auslastung, -Temperatur, -Takt und -Watt
@@ -24,9 +26,11 @@ Windows 10 (2004 oder neuer) und Windows 11. Ältere Versionen und Änderungen f
 - **Hersteller:**
   - Grafikkarten von NVIDIA laufen über NVML (mit Watt), AMD und Intel über die Windows-Schnittstellen.
   - Für CPU-Temperatur und -Watt bei AMD (Ryzen) und Intel wird der Treiber [PawnIO](https://pawnio.eu/) gebraucht.
-- **Weitere Funktionen:** Autostart, „immer mit Adminrechten“ ohne UAC-Abfrage, Installer und automatische Updates.
+- **Weitere Funktionen:** Autostart, „immer mit Adminrechten“ ohne UAC-Abfrage, Installer, automatische Updates mit Änderungsprotokoll, Fehlerberichte und Diagnosebericht.
 
-![Leistung – GPU](docs/leistung_gpu.png)
+![Leistung – CPU nach CCD](docs/leistung_ccd.png)
+
+![Benchmark (Beispielwerte)](docs/benchmark.png)
 
 ## Installation
 
@@ -65,10 +69,10 @@ Hat die Datei „Setup“ im Namen, also zum Beispiel `TaskPulse-Setup.exe`, sta
 ## Neue Version veröffentlichen
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File veroeffentlichen.ps1 0.1.7 "Kurz: was ist neu"
+powershell -ExecutionPolicy Bypass -File veroeffentlichen.ps1 0.1.7
 ```
 
-Das Skript setzt die Version in `Cargo.toml`, macht einen Commit und lädt den Tag `v0.1.7` hoch. Danach baut GitHub Actions (`.github/workflows/release.yml`) die Datei `TaskPulse-Setup.exe` und veröffentlicht sie als Release. Bereits installierte Versionen finden das Update dann von selbst.
+Vorher in `CHANGELOG.md` unter „Unveröffentlicht“ eintragen, was sich geändert hat – ohne Eintrag bricht das Skript ab. Das Skript macht daraus den Abschnitt der neuen Version (mit Datum), setzt die Version in `Cargo.toml`, macht einen Commit und lädt den Tag `v0.1.7` hoch. Danach baut GitHub Actions (`.github/workflows/release.yml`) die Datei `TaskPulse-Setup.exe` und veröffentlicht sie als Release; die Änderungen aus `CHANGELOG.md` stehen dort als Beschreibung. Bereits installierte Versionen finden das Update dann von selbst.
 
 Von Hand geht es so: In `Cargo.toml` die `version` erhöhen, committen und einen Tag `v<Version>` pushen. Tag und Version müssen übereinstimmen, sonst bricht der Bau ab.
 

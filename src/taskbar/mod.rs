@@ -568,8 +568,11 @@ pub fn run() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // Nur eine Instanz
+        // Gehört die Sperre einer Instanz mit Adminrechten, meldet Windows einer normalen
+        // „Zugriff verweigert“ statt „existiert schon“ – auch dann läuft bereits eine Anzeige.
         let _mutex = CreateMutexW(None, true, w!("Local\\TaskPulse.Taskbar"));
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+        let err = GetLastError();
+        if _mutex.is_err() || err == ERROR_ALREADY_EXISTS || err == ERROR_ACCESS_DENIED {
             return;
         }
         crate::updater::background_thread();
@@ -600,7 +603,7 @@ pub fn run() {
         let stop = Arc::new(AtomicBool::new(false));
 
         // Messthread
-        {
+        let measure = {
             let shared_cfg = shared_cfg.clone();
             let data = data.clone();
             let stop = stop.clone();
@@ -615,15 +618,17 @@ pub fn run() {
                         let b = sensors.sample(&c);
                         *data.lock().unwrap() = b;
                         let _ = PostMessageW(HWND(host_raw as *mut _), WM_APP_DATA, WPARAM(0), LPARAM(0));
+                        // in kleinen Schritten warten, damit das Beenden nicht hängt
                         let iv = c.taskbar.interval();
-                        let spent = t0.elapsed();
-                        if spent < iv {
-                            std::thread::sleep(iv - spent);
+                        while t0.elapsed() < iv && !stop.load(Ordering::Relaxed) {
+                            std::thread::sleep(std::time::Duration::from_millis(50).min(iv));
                         }
                     }
+                    // Sensoren (PawnIO, NVML, Leistungsindikatoren) hier geordnet schließen
+                    drop(sensors);
                 })
-                .ok();
-        }
+                .ok()
+        };
 
         let renderer = match Renderer::new() {
             Ok(r) => r,
@@ -659,6 +664,13 @@ pub fn run() {
             DispatchMessageW(&msg);
         }
         stop.store(true, Ordering::Relaxed);
+        if let Some(t) = measure {
+            // höchstens ~3 s auf eine laufende Messung warten
+            let t0 = Instant::now();
+            while !t.is_finished() && t0.elapsed().as_secs() < 3 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
         let w = with_app(|a| a.widget).unwrap_or_default();
         if !w.is_invalid() {
             let _ = DestroyWindow(w);

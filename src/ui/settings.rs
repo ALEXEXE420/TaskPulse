@@ -23,8 +23,29 @@ pub struct SettingsState {
     pub run_admin: bool,
 }
 
+/// `--section NAME`: beim Öffnen einmal zu diesem Abschnitt scrollen (Tests, Bildschirmfotos).
+fn scroll_target() -> Option<&'static str> {
+    static T: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let a: Vec<String> = std::env::args().collect();
+        a.iter().position(|x| x == "--section").and_then(|i| a.get(i + 1)).map(|s| s.to_lowercase())
+    })
+    .as_deref()
+}
+
+static SCROLLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(6.0);
+    // erst nach ein paar Bildern scrollen, wenn das Layout steht
+    if scroll_target().map(|t| title.to_lowercase().starts_with(t)).unwrap_or(false) {
+        let n = SCROLLED.load(std::sync::atomic::Ordering::Relaxed);
+        if n < 10 {
+            SCROLLED.store(n + 1, std::sync::atomic::Ordering::Relaxed);
+            ui.scroll_to_cursor(Some(egui::Align::TOP));
+            ui.ctx().request_repaint();
+        }
+    }
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new(title).strong().heading());
@@ -50,7 +71,8 @@ pub fn taskbar_running() -> bool {
                 let _ = windows::Win32::Foundation::CloseHandle(h);
                 true
             }
-            Err(_) => false,
+            // Sperre gehört einer Instanz mit Adminrechten → läuft
+            Err(e) => e.code() == windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult(),
         }
     }
 }
@@ -113,6 +135,9 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
     let admin_now = app.admin;
     let cfg = &mut app.cfg;
     let app_update = &mut app.update;
+    let diag_message = &mut app.diag_message;
+    let basic_took_ms = app.frame.took_ms;
+    let basic_procs = app.frame.procs.len();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.set_max_width(820.0);
@@ -363,6 +388,46 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
 
         section(ui, "Updates", |ui| app_update.settings(ui, cfg));
 
+        section(ui, "Fehlerberichte", |ui| {
+            ui.label(
+                RichText::new(
+                    "Geht etwas schief, schreibt TaskPulse sofort eine Datei mit dem Fehler (auch bei Abstürzen) und führt ein Protokoll kleinerer Probleme. \
+                     „Diagnosebericht erstellen“ fasst alles in einer Datei zusammen – die kannst du weitergeben. Es wird nichts automatisch gesendet.",
+                )
+                .small()
+                .weak(),
+            );
+            let n = std::fs::read_dir(crate::diag::dir())
+                .map(|rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("Fehler-") || e.file_name().to_string_lossy().starts_with("Absturz-")).count())
+                .unwrap_or(0);
+            ui.horizontal(|ui| {
+                if ui.button(RichText::new("Diagnosebericht erstellen").strong()).clicked() {
+                    let extra = format!(
+                        "Messung: {:.0} ms · {} Prozesse · GPU-Quelle: {} · CPU-Temperatur: {}",
+                        basic_took_ms,
+                        basic_procs,
+                        basic.gpu.source.clone().unwrap_or_default(),
+                        basic.cpu_temp_status
+                    );
+                    *diag_message = Some(match crate::diag::diagnose(&extra) {
+                        Some(p) => {
+                            winutil::open_in_explorer(&p.to_string_lossy());
+                            format!("Erstellt: {}", p.display())
+                        }
+                        None => "Diagnosebericht konnte nicht geschrieben werden".into(),
+                    });
+                }
+                if ui.button("Ordner öffnen").clicked() {
+                    let _ = std::fs::create_dir_all(crate::diag::dir());
+                    winutil::shell_open(&crate::diag::dir().to_string_lossy());
+                }
+                ui.label(RichText::new(if n == 0 { "keine Fehlerberichte".to_string() } else { format!("{n} Fehlerbericht(e) vorhanden") }).weak());
+            });
+            if let Some(m) = diag_message.as_ref() {
+                ui.label(RichText::new(m).small());
+            }
+        });
+
         section(ui, "Allgemein", |ui| {
             let busy = st.autostart_job.is_some();
             let mut want = st.autostart_actual.unwrap_or(false);
@@ -400,7 +465,7 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                     winutil::shell_open(&crate::config::Config::dir().to_string_lossy());
                 }
             });
-            ui.label(RichText::new(format!("TaskPulse {} · keine Telemetrie, Internet nur für die Update-Prüfung bei GitHub (abschaltbar)", env!("CARGO_PKG_VERSION"))).small().weak());
+            ui.label(RichText::new(format!("TaskPulse {} · keine Telemetrie, Internet nur für die Update-Prüfung bei GitHub (abschaltbar)", crate::updater::CURRENT)).small().weak());
         });
     });
 }

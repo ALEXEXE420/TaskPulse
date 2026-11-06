@@ -1,4 +1,5 @@
 /target/
+dev_version.txt
 *.alt-*.exe
 # lokales Hilfsskript (enthält Pfade dieses Rechners)
 projekt_uebernehmen.ps1

@@ -1,5 +1,6 @@
 //! Hauptfenster (egui): Prozesse, Leistung, Einstellungen.
 
+mod benchmark;
 mod performance;
 mod processes;
 mod settings;
@@ -29,6 +30,10 @@ pub struct Frame {
     pub procs: Vec<Proc>,
     pub adapters: Vec<DxgiAdapter>,
     pub vram_total: Option<f64>,
+    /// Watt/Spannung je physischem Kern (nur mit PawnIO)
+    pub core_readings: Vec<crate::sensors::cputemp::CoreReading>,
+    /// AMD: Temperatur je CCD (Hardware-Reihenfolge)
+    pub ccd_temps: Vec<f64>,
     pub vram_used: Option<f64>,
     pub took_ms: f64,
 }
@@ -55,7 +60,16 @@ fn start_collector(ctx: egui::Context, cfg: Config) -> Collector {
                 let mut disk = Disk::new();
                 let mut gpu = GpuProc::new();
                 let mut procs = Procs::new();
+                let phys_cores: Vec<Vec<usize>> = crate::sensors::topology::query().cores.into_iter().map(|c| c.lps).collect();
+                // Messen auch dann im Takt, wenn andere Programme die CPU voll auslasten (Benchmark mit CPU-Burner)
+                unsafe {
+                    let _ = windows::Win32::System::Threading::SetThreadPriority(
+                        windows::Win32::System::Threading::GetCurrentThread(),
+                        windows::Win32::System::Threading::THREAD_PRIORITY_ABOVE_NORMAL,
+                    );
+                }
                 let mut seq = 0u64;
+                let mut next: Option<Instant> = None;
                 loop {
                     let iv = interval_ms.load(Ordering::Relaxed);
                     if iv == 0 {
@@ -65,6 +79,25 @@ fn start_collector(ctx: egui::Context, cfg: Config) -> Collector {
                     let t0 = Instant::now();
                     let c = cfg.lock().unwrap().clone();
                     let b = basic.sample(&c);
+                    let core_readings = basic.per_core(&phys_cores);
+                    let ccd_temps = basic.ccd_temps();
+                    // Nur für Bildschirmfotos ohne Adminrechte: TASKPULSE_DEMO_KERNE=1 setzt Beispielwerte ein
+                    let (core_readings, ccd_temps) = if core_readings.is_empty() && std::env::var_os("TASKPULSE_DEMO_KERNE").is_some() {
+                        let demo = phys_cores
+                            .iter()
+                            .enumerate()
+                            .map(|(i, l)| crate::sensors::cputemp::CoreReading {
+                                lps: l.clone(),
+                                watts: Some(0.4 + (i % 5) as f64 * 1.3),
+                                volts: Some(0.95 + (i % 4) as f64 * 0.09),
+                                // AMD meldet keine Temperatur je Kern; Intel schon
+                                temp_c: crate::sensors::cputemp::cpu_info().vendor.contains("Intel").then(|| 41.0 + (i % 6) as f64 * 3.0),
+                            })
+                            .collect();
+                        (demo, vec![48.6, 41.9])
+                    } else {
+                        (core_readings, ccd_temps)
+                    };
                     let d = disk.as_mut().map(|d| d.sample()).unwrap_or_default();
                     let g = gpu.as_mut().map(|g| g.sample()).unwrap_or_default();
                     let p = procs.sample();
@@ -74,12 +107,14 @@ fn start_collector(ctx: egui::Context, cfg: Config) -> Collector {
                     seq += 1;
                     let took_ms = t0.elapsed().as_secs_f64() * 1000.0;
                     *frame.lock().unwrap() =
-                        Some(Frame { seq, basic: b, disk: d, gpu: g, procs: p, adapters, vram_total, vram_used, took_ms });
+                        Some(Frame { seq, basic: b, disk: d, gpu: g, procs: p, adapters, vram_total, vram_used, took_ms, core_readings, ccd_temps });
                     ctx.request_repaint();
-                    let spent = t0.elapsed();
+                    // Nächster Messzeitpunkt fest im Takt (sonst summieren sich Verzögerungen,
+                    // und im Benchmark fehlt alle ~15 s eine Sekunde)
                     let iv = Duration::from_millis(iv);
-                    if spent < iv {
-                        std::thread::sleep(iv - spent);
+                    next = next.map(|n| n + iv).filter(|n| *n > Instant::now()).or(Some(t0 + iv));
+                    if let Some(n) = next {
+                        std::thread::sleep(n.saturating_duration_since(Instant::now()));
                     }
                 }
             })
@@ -101,6 +136,19 @@ pub struct History {
     pub vram: VecDeque<f64>,
     pub cores: Vec<VecDeque<f64>>,
     pub engines: Vec<(String, VecDeque<f64>)>,
+    /// Lesen/Schreiben aller Datenträger, Bytes/s
+    pub disk_read: VecDeque<f64>,
+    pub disk_write: VecDeque<f64>,
+    /// Jeder Datenträger einzeln
+    pub disks: Vec<DiskHist>,
+}
+
+#[derive(Default, Clone)]
+pub struct DiskHist {
+    pub index: u32,
+    pub active: VecDeque<f64>,
+    pub read: VecDeque<f64>,
+    pub write: VecDeque<f64>,
 }
 
 fn push(q: &mut VecDeque<f64>, v: f64) {
@@ -115,6 +163,24 @@ impl History {
         push(&mut self.cpu, f.basic.cpu.load_pct.unwrap_or(0.0));
         push(&mut self.mem, f.basic.mem.used_pct.unwrap_or(0.0));
         push(&mut self.disk, f.disk.active_pct.unwrap_or(0.0));
+        push(&mut self.disk_read, f.disk.read_bps.unwrap_or(0.0));
+        push(&mut self.disk_write, f.disk.write_bps.unwrap_or(0.0));
+        // Datenträger kommen und gehen (USB): nur die aktuellen behalten
+        self.disks.retain(|h| f.disk.disks.iter().any(|d| d.index == h.index));
+        for d in &f.disk.disks {
+            let pos = match self.disks.iter().position(|h| h.index == d.index) {
+                Some(p) => p,
+                None => {
+                    self.disks.push(DiskHist { index: d.index, ..Default::default() });
+                    self.disks.len() - 1
+                }
+            };
+            let h = &mut self.disks[pos];
+            push(&mut h.active, d.active_pct.unwrap_or(0.0));
+            push(&mut h.read, d.read_bps.unwrap_or(0.0));
+            push(&mut h.write, d.write_bps.unwrap_or(0.0));
+        }
+        self.disks.sort_by_key(|h| h.index);
         push(&mut self.net_down, f.basic.net.down_bps.unwrap_or(0.0));
         push(&mut self.net_up, f.basic.net.up_bps.unwrap_or(0.0));
         push(&mut self.gpu, f.gpu.total_pct.or(f.basic.gpu.load_pct).unwrap_or(0.0));
@@ -146,6 +212,7 @@ impl History {
 pub enum Tab {
     Processes,
     Performance,
+    Benchmark,
     Settings,
 }
 
@@ -194,6 +261,11 @@ pub struct TaskPulseApp {
     pub perf: performance::PerfState,
     pub settings: settings::SettingsState,
     pub update: update::UpdateUi,
+    pub bench: benchmark::BenchState,
+    /// Absturzbericht aus dem Windows-Protokoll (beim Start im Hintergrund geprüft)
+    pub crash_notice: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// Ergebnis „Diagnosebericht erstellen“
+    pub diag_message: Option<String>,
 }
 
 impl TaskPulseApp {
@@ -220,9 +292,23 @@ impl TaskPulseApp {
             always_on_top_applied: None,
             font_applied: 0.0,
             procs: processes::ProcState::default(),
-            perf: performance::PerfState { item: if std::env::args().any(|a| a == "gpu") { performance::Item::Gpu } else { performance::Item::Cpu }, per_core: false },
+            perf: performance::PerfState { item: performance::start_item() },
             settings: settings::SettingsState::default(),
             update: update::UpdateUi::default(),
+            bench: benchmark::BenchState::from_args(),
+            crash_notice: {
+                let n = Arc::new(Mutex::new(None));
+                let n2 = n.clone();
+                let ctx = cc.egui_ctx.clone();
+                std::thread::spawn(move || {
+                    if let Some(p) = crate::diag::check_new_crashes() {
+                        *n2.lock().unwrap() = Some(p);
+                        ctx.request_repaint();
+                    }
+                });
+                n
+            },
+            diag_message: None,
         }
     }
 
@@ -262,18 +348,25 @@ impl TaskPulseApp {
                 ui.add_space(12.0);
                 ui.selectable_value(&mut self.tab, Tab::Processes, "Prozesse");
                 ui.selectable_value(&mut self.tab, Tab::Performance, "Leistung");
+                let bench_label = if self.bench.recording { "Benchmark ●" } else { "Benchmark" };
+                ui.selectable_value(&mut self.tab, Tab::Benchmark, bench_label);
                 ui.selectable_value(&mut self.tab, Tab::Settings, "Einstellungen");
+                // Wenig Platz (schmales Fenster, große Schrift): kürzere Beschriftungen rechts
+                let narrow = ui.available_width() < 880.0;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.checkbox(&mut self.cfg.always_on_top, "Immer im Vordergrund").changed() {}
+                    ui.checkbox(&mut self.cfg.always_on_top, if narrow { "Vordergrund" } else { "Immer im Vordergrund" })
+                        .on_hover_text("Hauptfenster immer im Vordergrund");
                     egui::ComboBox::from_id_salt("speed").selected_text(self.speed.label()).show_ui(ui, |ui| {
                         for s in [Speed::High, Speed::Normal, Speed::Low, Speed::Paused] {
                             ui.selectable_value(&mut self.speed, s, s.label());
                         }
                     });
-                    ui.label("Aktualisierung:");
+                    if !narrow {
+                        ui.label("Aktualisierung:");
+                    }
                     if !self.admin {
                         if ui
-                            .button("🛡 Mit Adminrechten neu starten")
+                            .button(if narrow { "🛡 Als Admin" } else { "🛡 Mit Adminrechten neu starten" })
                             .on_hover_text("Ohne Adminrechte fehlen CPU-Temperatur, einige Prozessdaten und Aktionen.")
                             .clicked()
                         {
@@ -282,11 +375,29 @@ impl TaskPulseApp {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
                         }
-                        ui.colored_label(egui::Color32::from_rgb(200, 140, 0), "Eingeschränkt");
+                        if !narrow {
+                            ui.colored_label(egui::Color32::from_rgb(200, 140, 0), "Eingeschränkt");
+                        }
                     }
                 });
             });
             ui.add_space(2.0);
+        });
+    }
+
+    /// Hinweis, wenn TaskPulse zuletzt abgestürzt ist.
+    fn crash_banner(&mut self, ctx: &egui::Context) {
+        let Some(p) = self.crash_notice.lock().unwrap().clone() else { return };
+        egui::TopBottomPanel::top("crash_banner").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(220, 120, 40), egui::RichText::new("⚠ TaskPulse ist zuletzt abgestürzt – ein Fehlerbericht wurde erstellt.").strong());
+                if ui.button("Bericht zeigen").clicked() {
+                    winutil::open_in_explorer(&p.to_string_lossy());
+                }
+                if ui.small_button("OK").clicked() {
+                    *self.crash_notice.lock().unwrap() = None;
+                }
+            });
         });
     }
 
@@ -315,7 +426,9 @@ impl TaskPulseApp {
 impl eframe::App for TaskPulseApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
-        self.collector.interval_ms.store(self.speed.ms(), Ordering::Relaxed);
+        let ms = if self.bench.recording { 1000 } else { self.speed.ms() };
+        self.collector.interval_ms.store(ms, Ordering::Relaxed);
+        benchmark::record(self);
         if self.always_on_top_applied != Some(self.cfg.always_on_top) {
             let lvl = if self.cfg.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(lvl));
@@ -336,10 +449,12 @@ impl eframe::App for TaskPulseApp {
         self.update.auto_start(ctx, &self.cfg);
         self.top_bar(ctx);
         self.update.banner(ctx);
+        self.crash_banner(ctx);
         self.status_bar(ctx);
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Processes => processes::show(self, ui),
             Tab::Performance => performance::show(self, ui),
+            Tab::Benchmark => benchmark::show(self, ui),
             Tab::Settings => settings::show(self, ui),
         });
         processes::dialogs(self, ctx);
@@ -349,6 +464,8 @@ impl eframe::App for TaskPulseApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Laufende FPS-Messung beenden (die Windows-Ereignissitzung würde sonst weiterlaufen)
+        self.bench.end();
         if self.cfg != self.saved_cfg {
             let _ = self.cfg.save();
         }
