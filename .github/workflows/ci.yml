@@ -23,7 +23,7 @@ jobs:
         run: cargo build --release --target aarch64-pc-windows-msvc
 
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

@@ -67,7 +67,7 @@ jobs:
   linux:
     # Linux-Version als AppImage – nach dem Windows-Teil, der das Release mit Beschreibung anlegt
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
