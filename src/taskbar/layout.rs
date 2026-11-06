@@ -43,6 +43,8 @@ pub fn cell(f: Field, b: &Basic, cfg: &Config) -> Cell {
         },
         Field::CpuPower => format!("CPU: {}", format::watts(b.cpu_power_w)),
         Field::GpuPower => format!("GPU: {}", format::watts(b.gpu.power_w)),
+        Field::GpuHotspot => format!("Hot-Spot: {}", format::temp(b.gpu.hotspot_c)),
+        Field::GpuMemTemp => format!("VRAM: {}", format::temp(b.gpu.mem_temp_c)),
     };
     let extra = if line_enabled(f, cfg) {
         let v = if f == Field::Up { b.line_up_pct } else { b.line_down_pct };
@@ -80,6 +82,8 @@ pub fn template(f: Field, cfg: &Config) -> Cell {
         },
         Field::CpuPower => "CPU: 888 W".into(),
         Field::GpuPower => "GPU: 888 W".into(),
+        Field::GpuHotspot => "Hot-Spot: 188 °C".into(),
+        Field::GpuMemTemp => "VRAM: 188 °C".into(),
     };
     let extra = line_enabled(f, cfg).then(|| "888 %".to_string());
     Cell { text, extra }

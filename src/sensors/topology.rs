@@ -45,6 +45,9 @@ pub struct RawTopology {
     pub caches: Vec<Cache>,
     /// Sockel: logische Prozessoren je Paket
     pub packages: Vec<Vec<usize>>,
+    /// Alle Caches (L1 Daten/Befehle, L2, L3) für die Spezifikation: (Ebene, Art, Größe)
+    /// Art: 0 = gemeinsam, 1 = Befehle, 2 = Daten
+    pub all_caches: Vec<(u8, u8, u64)>,
 }
 
 /// Eine angezeigte Gruppe, z. B. "CCD 1" oder "P-Kerne".
@@ -116,6 +119,10 @@ pub fn parse(buf: &[u8]) -> RawTopology {
                 let csize = rd32(rec, 12).unwrap_or(0) as u64;
                 let n = rd16(rec, 38).unwrap_or(0).max(1) as usize;
                 let lps = affinities(rec, 40, n);
+                let kind = rd32(rec, 16).unwrap_or(0).min(3) as u8;
+                if csize > 0 {
+                    t.all_caches.push((level, kind, csize));
+                }
                 if level == 3 && !lps.is_empty() {
                     t.caches.push(Cache { level, size: csize, lps });
                 }
@@ -130,7 +137,85 @@ pub fn parse(buf: &[u8]) -> RawTopology {
     t
 }
 
+/// Fragt Linux nach dem Aufbau der CPU (/sys/devices/system/cpu):
+/// Kerne aus topology/core_id + physical_package_id, L3-Caches aus cache/index*/shared_cpu_list,
+/// P-/E-Kerne (Intel) aus /sys/devices/cpu_core bzw. cpu_atom, bei ARM aus cpu_capacity.
+#[cfg(target_os = "linux")]
+pub fn query() -> RawTopology {
+    use super::sysfs::{parse_cpu_list, parse_size, read, read_u64};
+    let base = "/sys/devices/system/cpu";
+    let online = read(format!("{base}/online")).map(|s| parse_cpu_list(&s)).unwrap_or_default();
+    let p_cores = read("/sys/devices/cpu_core/cpus").map(|s| parse_cpu_list(&s));
+    let mut capacity: Vec<(usize, u64)> = Vec::new();
+    let mut by_core: BTreeMap<(u64, u64), Vec<usize>> = BTreeMap::new();
+    let mut by_pkg: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    let mut l3: BTreeMap<Vec<usize>, u64> = BTreeMap::new();
+    let mut all_caches: Vec<(u8, u8, u64)> = Vec::new();
+    for &lp in &online {
+        let t = format!("{base}/cpu{lp}/topology");
+        let pkg = read_u64(format!("{t}/physical_package_id")).unwrap_or(0);
+        let core = read_u64(format!("{t}/core_id")).unwrap_or(lp as u64);
+        by_core.entry((pkg, core)).or_default().push(lp);
+        by_pkg.entry(pkg).or_default().push(lp);
+        if let Some(c) = read_u64(format!("{base}/cpu{lp}/cpu_capacity")) {
+            capacity.push((lp, c));
+        }
+        for idx in super::sysfs::dirs(format!("{base}/cpu{lp}/cache")) {
+            // Jeden Cache nur einmal zählen: beim ersten logischen Prozessor, der ihn teilt
+            let shared_all = read(idx.join("shared_cpu_list")).map(|s| parse_cpu_list(&s)).unwrap_or_default();
+            if shared_all.first() == Some(&lp) {
+                let level = read_u64(idx.join("level")).unwrap_or(0) as u8;
+                let kind = match read(idx.join("type")).as_deref().map(str::trim) {
+                    Some("Instruction") => 1,
+                    Some("Data") => 2,
+                    _ => 0,
+                };
+                if let Some(size) = read(idx.join("size")).and_then(|s| parse_size(&s)) {
+                    all_caches.push((level, kind, size));
+                }
+            }
+            if read(idx.join("level")).as_deref() == Some("3") {
+                let shared = read(idx.join("shared_cpu_list")).map(|s| parse_cpu_list(&s)).unwrap_or_default();
+                let size = read(idx.join("size")).and_then(|s| parse_size(&s)).unwrap_or(0);
+                if !shared.is_empty() {
+                    l3.insert(shared, size);
+                }
+            }
+        }
+    }
+    let caps: Vec<u64> = {
+        let mut c: Vec<u64> = capacity.iter().map(|x| x.1).collect();
+        c.sort_unstable();
+        c.dedup();
+        c
+    };
+    let efficiency = |lp: usize| -> u8 {
+        if let Some(p) = &p_cores {
+            return if p.contains(&lp) { 1 } else { 0 };
+        }
+        if caps.len() > 1 {
+            if let Some((_, c)) = capacity.iter().find(|x| x.0 == lp) {
+                return caps.iter().position(|x| x == c).unwrap_or(0) as u8;
+            }
+        }
+        0
+    };
+    let mut t = RawTopology::default();
+    for (_, mut lps) in by_core {
+        lps.sort_unstable();
+        let efficiency = efficiency(lps[0]);
+        t.cores.push(Core { lps, efficiency });
+    }
+    t.caches = l3.into_iter().map(|(lps, size)| Cache { level: 3, size, lps }).collect();
+    t.all_caches = all_caches;
+    t.packages = by_pkg.into_values().collect();
+    t.cores.sort_by_key(|c| c.lps.first().copied().unwrap_or(0));
+    t.caches.sort_by_key(|c| c.lps.first().copied().unwrap_or(0));
+    t
+}
+
 /// Fragt Windows nach dem Aufbau der CPU.
+#[cfg(windows)]
 pub fn query() -> RawTopology {
     use windows::Win32::System::SystemInformation::{GetLogicalProcessorInformationEx, LOGICAL_PROCESSOR_RELATIONSHIP, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX};
     unsafe {

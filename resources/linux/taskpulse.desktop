@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TaskPulse
+GenericName=Task-Manager
+Comment=Prozesse, Leistung und Benchmark mit GPU-Werten
+Exec=TaskPulse
+Icon=taskpulse
+Terminal=false
+Categories=System;Monitor;
+Keywords=Task;Manager;CPU;GPU;Monitor;Benchmark;

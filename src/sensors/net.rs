@@ -2,6 +2,7 @@
 //! damit VPN- und virtuelle Adapter nicht doppelt zählen.
 
 use std::time::Instant;
+#[cfg(windows)]
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -17,6 +18,7 @@ pub struct Adapter {
     pub tx_link_bps: u64,
 }
 
+#[cfg(windows)]
 pub fn list_adapters() -> Vec<Adapter> {
     let mut out = Vec::new();
     let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
@@ -53,6 +55,43 @@ pub fn list_adapters() -> Vec<Adapter> {
         FreeMibTable(table as *const _);
     }
     out
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+/// Eine Zeile aus /proc/net/dev → (Name, empfangene Bytes, gesendete Bytes)
+pub fn parse_net_dev_line(line: &str) -> Option<(String, u64, u64)> {
+    let (name, rest) = line.split_once(':')?;
+    let v: Vec<u64> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    (v.len() >= 9).then(|| (name.trim().to_string(), v[0], v[8]))
+}
+
+/// Linux: Adapter aus /proc/net/dev, Details aus /sys/class/net/<name>
+#[cfg(target_os = "linux")]
+pub fn list_adapters() -> Vec<Adapter> {
+    use super::sysfs::{read, read_i64};
+    let Ok(dev) = std::fs::read_to_string("/proc/net/dev") else { return Vec::new() };
+    dev.lines()
+        .skip(2)
+        .filter_map(parse_net_dev_line)
+        .map(|(name, rx, tx)| {
+            let base = format!("/sys/class/net/{name}");
+            // Physisch = hat ein Gerät (PCI/USB); lo, docker0, veth*, tun* nicht
+            let hardware = std::path::Path::new(&format!("{base}/device")).exists();
+            let wireless = std::path::Path::new(&format!("{base}/wireless")).exists();
+            let speed = read_i64(format!("{base}/speed")).filter(|s| *s > 0).map(|s| s as u64 * 1_000_000).unwrap_or(0);
+            Adapter {
+                guid: name.clone(),
+                description: if wireless { format!("WLAN ({name})") } else if hardware { format!("Ethernet ({name})") } else { name.clone() },
+                name,
+                hardware,
+                up: read(format!("{base}/operstate")).map(|s| s == "up").unwrap_or(false),
+                in_octets: rx,
+                out_octets: tx,
+                rx_link_bps: speed,
+                tx_link_bps: speed,
+            }
+        })
+        .collect()
 }
 
 /// Automatische Wahl: aktiver physischer Adapter mit dem meisten Verkehr.
@@ -104,5 +143,17 @@ impl Net {
         }
         self.last = Some((a.guid.clone(), a.in_octets, a.out_octets, now));
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proc_net_dev() {
+        let l = "  eth0: 123456 100 0 0 0 0 0 0 654321 90 0 0 0 0 0 0";
+        assert_eq!(parse_net_dev_line(l), Some(("eth0".to_string(), 123456, 654321)));
+        assert_eq!(parse_net_dev_line("Inter-|   Receive"), None);
     }
 }

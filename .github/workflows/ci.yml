@@ -12,7 +12,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test
+      - name: Release-Build
+        run: cargo build --release
+      - name: ARM64-Build
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Pakete für den Bau
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
       - name: Tests
         run: cargo test
       - name: Release-Build

@@ -114,11 +114,40 @@ fn side_entry(ui: &mut egui::Ui, selected: bool, title: &str, sub: &str, s: &Vec
     ui.interact(r.rect, ui.id().with(title), Sense::click()).clicked()
 }
 
+/// Breite, die nie schrumpft – so verschieben wechselnde Zahlen (z. B. 9,8 W → 10,2 W) nichts daneben.
+fn grow_width(ui: &egui::Ui, id: egui::Id, w: f32) -> f32 {
+    ui.data_mut(|d| {
+        let e = d.get_temp_mut_or(id, 0.0f32);
+        if w > *e {
+            *e = w;
+        }
+        *e
+    })
+}
+
 fn stat(ui: &mut egui::Ui, label: &str, value: String) {
-    ui.vertical(|ui| {
-        ui.label(RichText::new(label).small().weak());
-        ui.label(RichText::new(value).heading());
-    });
+    let id = ui.id().with(("stat_w", label));
+    let min = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    let r = ui
+        .vertical(|ui| {
+            ui.set_min_width(min);
+            ui.add(egui::Label::new(RichText::new(label).small().weak()).extend());
+            ui.add(egui::Label::new(RichText::new(value).heading()).extend());
+        })
+        .response;
+    grow_width(ui, id, r.rect.width());
+    ui.add_space(6.0);
+}
+
+/// Text in einem Feld, das nur wächst (rechtsbündig bei `right`), damit Nachbarn stehen bleiben.
+fn steady(ui: &mut egui::Ui, key: impl std::hash::Hash, text: RichText, right: bool) -> egui::Response {
+    let id = ui.id().with(("steady", key));
+    let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
+    let w = grow_width(ui, id, galley.size().x);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, galley.size().y), Sense::hover());
+    let x = if right { rect.right() - galley.size().x } else { rect.left() };
+    ui.painter().galley(egui::pos2(x, rect.top()), galley, ui.visuals().text_color());
+    resp
 }
 
 /// Skala für Übertragungsraten der Datenträger: ab 1 MB/s, verdoppelt bis der Höchstwert passt.
@@ -213,35 +242,58 @@ fn core_tile(ui: &mut egui::Ui, size: Vec2, lp: usize, q: &VecDeque<f64>, mhz: O
     let small = (big * 0.68).clamp(11.0, 14.0);
     let pct = format::pct0(v);
     let clock = ghz(mhz);
-    // Passt der Takt vor die Prozentzahl? Sonst kommt er in die zweite Zeile.
-    let w_pct = ui.painter().layout_no_wrap(pct.clone(), egui::FontId::proportional(big), strong).size().x;
-    let w_clk = clock.as_ref().map(|c| ui.painter().layout_no_wrap(c.clone(), egui::FontId::proportional(small), text).size().x + 6.0).unwrap_or(0.0);
-    let clock_first = clock.is_some() && w_clk + w_pct + 12.0 <= size.x;
-    let mut p = r.rect.left_top() + Vec2::new(5.0, 3.0);
-    let mut line_h = 0.0f32;
+    // Feste Plätze nach der breitesten möglichen Anzeige („100 %“, „0,00 GHz“ …), damit nichts springt,
+    // wenn sich Takt, Last oder Watt ändern.
+    let width_of = |t: &str, sz: f32| ui.painter().layout_no_wrap(t.to_string(), egui::FontId::proportional(sz), text).size().x;
+    let w_pct = width_of("100 %", big);
+    let w_clk = width_of("0,00 GHz", small);
+    let clock_first = clock.is_some() && w_clk + 6.0 + w_pct + 12.0 <= size.x;
+    let p = r.rect.left_top() + Vec2::new(5.0, 3.0);
+    let mut x = 0.0;
     if clock_first {
-        let c = label_at(ui, p + Vec2::new(0.0, (big - small) * 0.55), clock.clone().unwrap(), small, text);
-        p.x += c.x + 6.0;
+        label_at(ui, p + Vec2::new(0.0, (big - small) * 0.55), clock.clone().unwrap(), small, text);
+        x = w_clk + 6.0;
     }
-    let sz = label_at(ui, p, pct, big, strong);
-    line_h = line_h.max(sz.y);
-    // zweite Zeile: (Takt,) Watt, Spannung
-    let mut second: Vec<String> = Vec::new();
+    let line_h = label_at(ui, p + Vec2::new(x, 0.0), pct, big, strong).y;
+    // zweite Zeile: (Takt,) Watt, Spannung – jeweils an fester Stelle
+    let mut second: Vec<(String, f32)> = Vec::new();
     if !clock_first {
         if let Some(c) = clock.clone() {
-            second.push(c);
+            second.push((c, w_clk));
         }
     }
     if let Some(rd) = rd {
         if let Some(wt) = rd.watts {
-            second.push(format!("{} W", format::de(wt, 1)));
+            second.push((format!("{} W", format::de(wt, 1)), width_of("00,0 W", small)));
         }
         if let Some(vt) = rd.volts {
-            second.push(format!("{} V", format::de(vt, 3)));
+            second.push((format!("{} V", format::de(vt, 3)), width_of("0,000 V", small)));
         }
     }
-    if !second.is_empty() && size.y >= line_h + small + 8.0 {
-        label_at(ui, r.rect.left_top() + Vec2::new(5.0, 4.0 + line_h), second.join("  "), small, text);
+    // In Zeilen aufteilen, die in die Kachel passen (feste Plätze, kein Abschneiden)
+    let avail = size.x - 10.0;
+    let mut lines: Vec<Vec<(String, f32)>> = vec![Vec::new()];
+    let mut used = 0.0;
+    for (t, w) in second {
+        let need = if used == 0.0 { w } else { used + 8.0 + w };
+        if need > avail && used > 0.0 {
+            lines.push(Vec::new());
+            used = w;
+        } else {
+            used = need;
+        }
+        lines.last_mut().unwrap().push((t, w));
+    }
+    for (k, line) in lines.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
+        let y = 4.0 + line_h + k as f32 * (small + 3.0);
+        if y + small + 2.0 > size.y {
+            break;
+        }
+        let mut q = r.rect.left_top() + Vec2::new(5.0, y);
+        for (t, w) in line {
+            let got = label_at(ui, q, t.clone(), small, text);
+            q.x += got.x.max(*w) + 8.0;
+        }
     }
     // Kerntemperatur unten links (weiß)
     if let Some(t) = rd.and_then(|r| r.temp_c) {
@@ -357,7 +409,10 @@ fn group_header(ui: &mut egui::Ui, g: &crate::sensors::topology::CoreGroup, st: 
             if let Some(v) = vmax {
                 parts.push(format!("bis {} V", format::de(v, 3)));
             }
-            ui.label(RichText::new(parts.join("   ")).strong());
+            ui.spacing_mut().item_spacing.x = 16.0;
+            for (i, p) in parts.into_iter().enumerate().rev() {
+                steady(ui, (&g.title, i), RichText::new(p).strong(), true);
+            }
         });
     });
 }
@@ -378,7 +433,7 @@ fn core_groups_view(ui: &mut egui::Ui, w: f32, cores: &[VecDeque<f64>], mhz: &[f
         }
         let cols = if single { core_cols(n) } else { group_cols(n) };
         let cw = ((w - gap * (cols - 1) as f32) / cols as f32).floor() - 1.0;
-        let min_h = if readings.iter().any(|r| r.temp_c.is_some()) { 74.0 } else if readings.is_empty() { 50.0 } else { 58.0 };
+        let min_h = if readings.iter().any(|r| r.temp_c.is_some()) { 100.0 } else if readings.is_empty() { 50.0 } else { 90.0 };
         let ch = (cw * 0.58).clamp(min_h, 140.0).min((avail_h / total_rows as f32).max(min_h));
         egui::Grid::new(("cores", gi)).spacing([gap, gap]).show(ui, |ui| {
             for (k, lp) in lps.iter().enumerate() {
@@ -418,7 +473,7 @@ fn group_load_view(ui: &mut egui::Ui, w: f32, cores: &[VecDeque<f64>], mhz: &[f6
                 ui.set_width(cw);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&g.title).strong().size(18.0).color(C_CPU));
-                    ui.label(RichText::new(format::pct0(avg)).strong().size(18.0));
+                    steady(ui, (&g.title, "avg"), RichText::new(format::pct0(avg)).strong().size(18.0), true);
                     temp_label(ui, group_temp(gi, groups.len(), &lps, ccd_temps, readings), 16.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(&g.detail).weak());
@@ -492,6 +547,342 @@ fn net_max(h: &VecDeque<f64>, h2: &VecDeque<f64>) -> f64 {
     scale
 }
 
+/// Weiße Temperaturmarke an fester Stelle (oben rechts in einer Karte).
+fn temp_badge(ui: &egui::Ui, rect: egui::Rect, t: f64) {
+    let g = ui.painter().layout_no_wrap(temp_text(t), egui::FontId::proportional(15.0), Color32::WHITE);
+    let pos = rect.right_top() + Vec2::new(-8.0 - g.size().x, 8.0);
+    ui.painter().rect_filled(egui::Rect::from_min_size(pos - Vec2::new(5.0, 1.0), g.size() + Vec2::new(10.0, 2.0)), 3.0, Color32::from_black_alpha(190));
+    ui.painter().galley(pos, g, Color32::WHITE);
+}
+
+/// Leistung → Arbeitsspeicher: je Riegel eine Karte (Steckplatz, Größe, Hersteller, Takt, Temperatur),
+/// darunter die laufenden Timings.
+fn ram_modules_view(ui: &mut egui::Ui, w: f32, dimms: &[crate::sensors::dimm::Dimm], temps: &[crate::sensors::dimm::DimmTemp], timings: &[crate::sensors::dimm::Timings]) {
+    use crate::sensors::dimm::{assign_temps, rfc_ns};
+    if dimms.is_empty() {
+        ui.add_space(8.0);
+        ui.label(RichText::new("Die Speicherriegel konnten nicht gelesen werden (SMBIOS-Tabelle fehlt).").small().weak());
+        return;
+    }
+    ui.add_space(10.0);
+    ui.label(RichText::new("Speicherriegel").strong().size(17.0).color(C_MEM));
+    let per_dimm = assign_temps(dimms.len(), temps);
+    let gap = 10.0;
+    let cols = dimms.len().clamp(1, ((w + gap) / 300.0).floor().max(1.0) as usize);
+    let cw = ((w - gap * (cols - 1) as f32) / cols as f32).floor() - 1.0;
+    egui::Grid::new("dimms").spacing([gap, gap]).show(ui, |ui| {
+        for (i, d) in dimms.iter().enumerate() {
+            let r = egui::Frame::none()
+                .fill(ui.visuals().faint_bg_color)
+                .stroke(egui::Stroke::new(1.0_f32, C_MEM.linear_multiply(0.5)))
+                .rounding(6.0)
+                .inner_margin(egui::Margin::same(10.0))
+                .show(ui, |ui| {
+                    ui.set_width(cw - 20.0);
+                    ui.vertical(|ui| {
+                    ui.label(RichText::new(if d.slot.is_empty() { format!("Riegel {}", i + 1) } else { d.slot.clone() }).strong().color(C_MEM));
+                    let speed = d.configured_mts.map(|m| format!("-{m}")).unwrap_or_default();
+                    ui.label(RichText::new(format!("{} GB {}{}", format::de(d.size_bytes / format::GIB, 0), d.kind, speed)).heading());
+                    let name = [d.manufacturer.clone(), d.part_number.clone()].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                    if !name.is_empty() {
+                        ui.label(name);
+                    }
+                    let mut det: Vec<String> = Vec::new();
+                    if !d.bank.is_empty() {
+                        det.push(d.bank.clone());
+                    }
+                    if let Some(r) = d.ranks {
+                        det.push(format!("{r} Rank"));
+                    }
+                    if let Some(v) = d.volts {
+                        det.push(format!("{} V", format::de(v, 2)));
+                    }
+                    if let Some(m) = d.rated_mts {
+                        det.push(format!("Riegel bis {m} MT/s"));
+                    }
+                    ui.label(RichText::new(det.join(" · ")).small().weak());
+                    });
+                })
+                .response;
+            if let Some(t) = per_dimm.as_ref().and_then(|v| v.get(i)) {
+                temp_badge(ui, r.rect, *t);
+            }
+            if (i + 1) % cols == 0 {
+                ui.end_row();
+            }
+        }
+    });
+    if per_dimm.is_none() && !temps.is_empty() {
+        let list: Vec<String> = temps.iter().map(|t| format!("Sensor {}: {}", t.index, temp_text(t.temp_c))).collect();
+        ui.label(format!("Temperaturen der Riegel: {}", list.join(" · ")));
+    }
+    let mut hint = String::from("Eine Auslastung je Riegel gibt es nicht: Der Speichercontroller verteilt die Daten gleichmäßig über alle Riegel (Interleaving) – die Belegung oben gilt für alle zusammen.");
+    if temps.is_empty() {
+        hint += if cfg!(windows) {
+            " Temperatur je Riegel: mit Adminrechten und PawnIO, wenn die Riegel einen Sensor haben (DDR5 immer, DDR4 nur manche)."
+        } else {
+            " Temperatur je Riegel: über die Kernel-Treiber jc42 (DDR4) bzw. spd5118 (DDR5), wenn die Riegel einen Sensor haben."
+        };
+    }
+    ui.add(egui::Label::new(RichText::new(hint).small().weak()).wrap());
+
+    // Timings
+    ui.add_space(10.0);
+    ui.label(RichText::new("Timings").strong().size(17.0).color(C_MEM));
+    let Some(t0) = timings.first() else {
+        let why = if !cfg!(windows) {
+            "Unter Linux liest TaskPulse die Timings noch nicht aus."
+        } else if crate::sensors::cputemp::cpu_info().vendor.contains("Intel") {
+            "Timings liest TaskPulse bisher nur bei AMD Ryzen aus dem Speichercontroller – Intel folgt."
+        } else {
+            "Die laufenden Timings kommen direkt aus dem Speichercontroller – dafür braucht TaskPulse Adminrechte und PawnIO."
+        };
+        ui.add(egui::Label::new(RichText::new(why).small().weak()).wrap());
+        return;
+    };
+    let mts = t0.mts.or(dimms.first().and_then(|d| d.configured_mts).map(|m| m as f64));
+    let same = timings.iter().all(|t| timings_eq(t, t0));
+    let shown: Vec<&crate::sensors::dimm::Timings> = if same { vec![t0] } else { timings.iter().collect() };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(t0.primary()).size(26.0).strong());
+        ui.vertical(|ui| {
+            ui.label(RichText::new("CL-tRCD-tRP-tRAS").small().weak());
+            let mut extra: Vec<String> = Vec::new();
+            if let Some(c) = t0.cmd2t {
+                extra.push(if c { "2T".into() } else { "1T".into() });
+            }
+            if let Some(g) = t0.gdm {
+                extra.push(format!("Gear Down {}", if g { "an" } else { "aus" }));
+            }
+            if let Some(m) = mts {
+                extra.push(format!("{} MT/s (MCLK {} MHz)", m.round(), (m / 2.0).round()));
+            }
+            ui.label(extra.join(" · "));
+        });
+    });
+    let rows: Vec<(&str, Box<dyn Fn(&crate::sensors::dimm::Timings) -> String>)> = vec![
+        ("tCL", Box::new(|t| t.cl.to_string())),
+        ("tRCD (Lesen)", Box::new(|t| t.rcd_rd.to_string())),
+        ("tRCD (Schreiben)", Box::new(|t| t.rcd_wr.to_string())),
+        ("tRP", Box::new(|t| t.rp.to_string())),
+        ("tRAS", Box::new(|t| t.ras.to_string())),
+        ("tRC", Box::new(|t| t.rc.to_string())),
+        ("tRRD_S", Box::new(|t| t.rrds.to_string())),
+        ("tRRD_L", Box::new(|t| t.rrdl.to_string())),
+        ("tFAW", Box::new(|t| t.faw.to_string())),
+        ("tWTR_S", Box::new(|t| t.wtrs.to_string())),
+        ("tWTR_L", Box::new(|t| t.wtrl.to_string())),
+        ("tWR", Box::new(|t| t.wr.to_string())),
+        ("tRTP", Box::new(|t| t.rtp.to_string())),
+        ("tCWL", Box::new(|t| t.cwl.to_string())),
+        (
+            "tRFC",
+            Box::new(move |t| match t.rfc {
+                Some(r) => match mts.and_then(|m| rfc_ns(r, m)) {
+                    Some(ns) => format!("{r} ({} ns)", format::de(ns, 0)),
+                    None => r.to_string(),
+                },
+                None => "–".into(),
+            }),
+        ),
+    ];
+    // In Spalten nebeneinander, damit es nicht zu lang wird
+    let per_col = if same { rows.len().div_ceil(((w / 230.0).floor() as usize).clamp(1, 5)) } else { rows.len() };
+    ui.horizontal_top(|ui| {
+        for chunk in rows.chunks(per_col.max(1)) {
+            egui::Grid::new(("timings", chunk[0].0)).num_columns(1 + shown.len()).spacing([18.0, 3.0]).striped(true).show(ui, |ui| {
+                if !same {
+                    ui.label("");
+                    for t in &shown {
+                        ui.label(RichText::new(format!("Kanal {}", (b'A' + t.channel as u8) as char)).weak());
+                    }
+                    ui.end_row();
+                }
+                for (name, f) in chunk {
+                    ui.label(RichText::new(*name).weak());
+                    for t in &shown {
+                        ui.label(RichText::new(f(t)).strong());
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.add_space(24.0);
+        }
+    });
+    ui.add(egui::Label::new(RichText::new("Laufende Werte aus dem Speichercontroller (in Takten), nur gelesen. Die Riegel-Angaben kommen aus der SMBIOS-Tabelle des BIOS.").small().weak()).wrap());
+}
+
+
+fn timings_eq(a: &crate::sensors::dimm::Timings, b: &crate::sensors::dimm::Timings) -> bool {
+    let mut a = a.clone();
+    a.channel = b.channel;
+    a == *b
+}
+
+/// Karte im Stil der Speicherriegel: Rahmen, Titel in Farbe, Inhalt untereinander.
+fn info_card(ui: &mut egui::Ui, width: f32, color: Color32, add: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+    egui::Frame::none()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(egui::Stroke::new(1.0_f32, color.linear_multiply(0.5)))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::same(10.0))
+        .show(ui, |ui| {
+            ui.set_width(width - 20.0);
+            ui.set_max_width(width - 20.0);
+            ui.vertical(add);
+        })
+        .response
+}
+
+/// Einzelner Datenträger: Karte mit dem Laufwerk selbst (Modell, Typ, Größe, Temperatur)
+/// und je Laufwerk (Partition) eine Karte mit Name wie im Explorer und Belegung.
+fn disk_cards(ui: &mut egui::Ui, w: f32, d: &crate::sensors::mem::DiskOne) {
+    ui.add_space(10.0);
+    ui.label(RichText::new("Laufwerk").strong().size(17.0).color(C_DISK));
+    let gap = 10.0;
+    let n = 1 + d.volumes.len();
+    let cols = n.clamp(1, ((w + gap) / 300.0).floor().max(1.0) as usize);
+    let cw = ((w - gap * (cols - 1) as f32) / cols as f32).floor() - 1.0;
+    egui::Grid::new(("disk_cards", d.index)).spacing([gap, gap]).show(ui, |ui| {
+        let r = info_card(ui, cw, C_DISK, |ui| {
+            ui.label(RichText::new(format!("Datenträger {}", d.index)).strong().color(C_DISK));
+            ui.label(RichText::new(d.info.model.clone().unwrap_or("Unbekanntes Modell".into())).heading());
+            let mut det: Vec<String> = Vec::new();
+            if let Some(k) = &d.info.kind {
+                det.push(k.clone());
+            }
+            if let Some(c) = d.capacity {
+                det.push(format::mem(c, crate::config::MemUnit::GB, 0));
+            }
+            ui.label(det.join(" · "));
+            ui.label(
+                RichText::new(if d.is_empty_adapter() {
+                    "Keine Festplatte angeschlossen – z. B. leerer SATA-auf-USB-Adapter oder Kartenleser".to_string()
+                } else if d.volumes.is_empty() {
+                    "kein Laufwerksbuchstabe".to_string()
+                } else {
+                    format!("{} Laufwerk(e)", d.volumes.len())
+                })
+                .small()
+                .weak(),
+            );
+        });
+        if let Some(t) = d.temp_c {
+            temp_badge(ui, r.rect, t);
+        }
+        for (i, v) in d.volumes.iter().enumerate() {
+            if (i + 1) % cols == 0 {
+                ui.end_row();
+            }
+            info_card(ui, cw, C_DISK, |ui| {
+                ui.label(RichText::new(&v.letter).strong().color(C_DISK));
+                ui.label(RichText::new(v.explorer_name()).heading());
+                if let (Some(t), Some(f)) = (v.total, v.free) {
+                    let used = (t - f).max(0.0);
+                    let frac = (used / t) as f32;
+                    // Belegungsbalken wie im Explorer (rot ab 90 %)
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 10.0), Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+                    let col = if frac >= 0.9 { Color32::from_rgb(218, 38, 38) } else { C_DISK };
+                    ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac.clamp(0.0, 1.0), rect.height())), 2.0, col);
+                    ui.label(format!(
+                        "{} frei von {}",
+                        format::mem(f, crate::config::MemUnit::GB, 1),
+                        format::mem(t, crate::config::MemUnit::GB, 1)
+                    ));
+                }
+                if v.disks.len() > 1 {
+                    let list = v.disks.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ");
+                    ui.label(RichText::new(format!("Verbund aus {} Datenträgern ({list})", v.disks.len())).strong());
+                    if let Some(h) = v.here {
+                        ui.label(format!("davon auf diesem Datenträger: {}", format::mem(h, crate::config::MemUnit::GB, 1)));
+                    }
+                }
+                ui.label(RichText::new(v.fs.clone().unwrap_or_default()).small().weak());
+            });
+        }
+    });
+}
+
+
+/// Ausklappbare Spezifikation (wie GPU-Z / CPU-Z): je Abschnitt eine Karte mit Bezeichnung und Wert.
+fn spec_view(ui: &mut egui::Ui, w: f32, id: &str, spec: &crate::sensors::spec::Spec, color: Color32) {
+    ui.add_space(8.0);
+    egui::CollapsingHeader::new(RichText::new("Spezifikation").strong().size(17.0).color(color)).id_salt(id).default_open(std::env::var_os("TASKPULSE_SPEC_OFFEN").is_some()).show(ui, |ui| {
+        if spec.sections.is_empty() {
+            ui.label(RichText::new("Noch keine Angaben – einen Moment …").weak());
+            return;
+        }
+        let gap = 10.0;
+        let w = ui.available_width().min(w) - 4.0;
+        let cols = if w >= 820.0 { 2 } else { 1 };
+        let cw = ((w - gap * (cols - 1) as f32) / cols as f32).floor() - 1.0;
+        let label_w = (cw * 0.36).clamp(120.0, 190.0);
+        egui::Grid::new((id, "spec")).spacing([gap, gap]).show(ui, |ui| {
+            for (i, sec) in spec.sections.iter().enumerate() {
+                info_card(ui, cw, color, |ui| {
+                    ui.label(RichText::new(&sec.title).strong().color(color));
+                    for (k, v) in &sec.rows {
+                        ui.horizontal_top(|ui| {
+                            ui.allocate_ui_with_layout(Vec2::new(label_w, 18.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                ui.set_width(label_w);
+                                ui.add(egui::Label::new(RichText::new(k).weak()).truncate());
+                            });
+                            ui.add(egui::Label::new(RichText::new(v).strong()).wrap());
+                        });
+                    }
+                });
+                if (i + 1) % cols == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+        ui.add(
+            egui::Label::new(
+                RichText::new("Angaben so, wie Treiber, Betriebssystem, BIOS und CPU sie melden – ohne Modelldatenbank. Was nicht gemeldet wird, fehlt.")
+                    .small()
+                    .weak(),
+            )
+            .wrap(),
+        );
+    });
+}
+
+/// Datenträger (alle): Liste mit Name, Typ, Größe, Temperatur und Aktivität.
+fn disk_list(ui: &mut egui::Ui, disks: &[crate::sensors::mem::DiskOne]) {
+    if disks.is_empty() {
+        return;
+    }
+    ui.add_space(10.0);
+    egui::Grid::new("disk_list").num_columns(7).spacing([18.0, 4.0]).striped(true).show(ui, |ui| {
+        for h in ["Nr.", "Name", "Modell", "Typ", "Kapazität", "Temperatur", "Aktive Zeit"] {
+            ui.label(RichText::new(h).weak());
+        }
+        ui.end_row();
+        for d in disks {
+            ui.label(d.index.to_string());
+            ui.label(RichText::new(d.title()).strong());
+            ui.label(d.info.model.clone().unwrap_or("–".into()));
+            ui.label(d.info.kind.clone().unwrap_or("–".into()));
+            ui.label(d.capacity.map(|c| format::mem(c, crate::config::MemUnit::GB, 0)).unwrap_or(if d.is_empty_adapter() { "leer".into() } else { "–".into() }));
+            ui.label(d.temp_c.map(temp_text).unwrap_or("–".into()));
+            ui.label(format::pct0(d.active_pct));
+            ui.end_row();
+        }
+    });
+    if disks.iter().any(|d| d.temp_c.is_none() && d.info.kind.as_deref() != Some("USB")) {
+        ui.add(egui::Label::new(
+            RichText::new(if cfg!(windows) {
+                "Temperaturen: NVMe-SSDs auch ohne Adminrechte, SATA-SSDs und Festplatten (über SMART) nur mit Adminrechten. Schlafende Festplatten werden dafür nicht geweckt; USB-Gehäuse melden meist keine Temperatur."
+            } else {
+                "Temperaturen kommen von den Kernel-Treibern nvme bzw. drivetemp (SATA)."
+            })
+            .small()
+            .weak(),
+        ).wrap());
+    }
+}
+
 pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
     let f = &app.frame;
     let h = &app.history;
@@ -523,12 +914,30 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
             if side_entry(ui, st.item == Item::Mem, "Arbeitsspeicher", &mem_sub, &h.mem, 100.0, C_MEM) {
                 st.item = Item::Mem;
             }
+            // Grafikkarte direkt unter dem Arbeitsspeicher
+            let gpu_sub = format!("{}  {}", format::pct0(f.gpu.total_pct.or(b.gpu.load_pct)), format::temp(b.gpu.temp_c));
+            if side_entry(ui, st.item == Item::Gpu, &format!("GPU 0 – {gpu_name}"), &gpu_sub, &h.gpu, 100.0, C_GPU) {
+                st.item = Item::Gpu;
+            }
             if side_entry(ui, st.item == Item::Disk, "Datenträger (alle)", &format::pct0(f.disk.active_pct), &h.disk, 100.0, C_DISK) {
                 st.item = Item::Disk;
             }
             for d in &f.disk.disks {
                 let Some(hd) = h.disks.iter().find(|x| x.index == d.index) else { continue };
-                let sub = format!("{}{}", d.info.kind.as_deref().map(|k| format!("{k}  ")).unwrap_or_default(), format::pct0(d.active_pct));
+                // Ohne Laufwerksbuchstaben heißt der Eintrag schon „Datenträger N“ → dann das Modell darunter
+                let first = if d.is_empty_adapter() {
+                    format!("{} · keine Festplatte", d.info.model.clone().unwrap_or("USB".into()))
+                } else if d.volumes.is_empty() {
+                    d.info.model.clone().unwrap_or_default()
+                } else {
+                    format!("Datenträger {}", d.index)
+                };
+                let sub = format!(
+                    "{first}\n{}{}{}",
+                    d.info.kind.as_deref().map(|k| format!("{k}  ")).unwrap_or_default(),
+                    format::pct0(d.active_pct),
+                    d.temp_c.map(|t| format!("  {}", temp_text(t))).unwrap_or_default()
+                );
                 if side_entry(ui, st.item == Item::DiskOne(d.index), &d.title(), &sub, &hd.active, 100.0, C_DISK) {
                     st.item = Item::DiskOne(d.index);
                 }
@@ -541,10 +950,6 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
             );
             if side_entry(ui, st.item == Item::Net, "Netzwerk", &net_sub, &h.net_down, netmax, C_NET) {
                 st.item = Item::Net;
-            }
-            let gpu_sub = format!("{}  {}", format::pct0(f.gpu.total_pct.or(b.gpu.load_pct)), format::temp(b.gpu.temp_c));
-            if side_entry(ui, st.item == Item::Gpu, &format!("GPU 0 – {gpu_name}"), &gpu_sub, &h.gpu, 100.0, C_GPU) {
-                st.item = Item::Gpu;
             }
         });
     });
@@ -599,10 +1004,25 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                         stat(ui, "Handles", handles.to_string());
                     });
                     ui.label(RichText::new(format!("Temperatur: {}", b.cpu_temp_status)).small().weak());
+                    spec_view(ui, w, "cpu", &f.cpu_spec, C_CPU);
                 }
                 Item::Mem => {
-                    ui.heading("Arbeitsspeicher");
-                    graph(ui, Vec2::new(w, 300.0), &[(&h.mem, C_MEM)], 100.0);
+                    let dimms = crate::sensors::dimm::modules();
+                    ui.horizontal(|ui| {
+                        ui.heading("Arbeitsspeicher");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(d) = dimms.first() {
+                                let total: f64 = dimms.iter().map(|d| d.size_bytes).sum();
+                                ui.label(format!(
+                                    "{} GB {}{}",
+                                    format::de(total / format::GIB, 0),
+                                    d.kind,
+                                    d.configured_mts.map(|m| format!(" · {m} MT/s")).unwrap_or_default()
+                                ));
+                            }
+                        });
+                    });
+                    graph(ui, Vec2::new(w, 260.0), &[(&h.mem, C_MEM)], 100.0);
                     ui.horizontal_wrapped(|ui| {
                         stat(ui, "In Verwendung", format::mem(b.mem.used_bytes, crate::config::MemUnit::GB, 1));
                         stat(ui, "Verfügbar", format::mem(b.mem.total_bytes - b.mem.used_bytes, crate::config::MemUnit::GB, 1));
@@ -616,7 +1036,12 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                                 format::mem(b.mem.commit_limit, crate::config::MemUnit::GB, 1)
                             ),
                         );
+                        if let Some(d) = dimms.first() {
+                            stat(ui, "Geschwindigkeit", d.configured_mts.map(|m| format!("{m} MT/s")).unwrap_or("–".into()));
+                            stat(ui, "Steckplätze belegt", dimms.len().to_string());
+                        }
                     });
+                    ram_modules_view(ui, w, dimms, &f.dimm_temps, &f.ram_timings);
                 }
                 Item::Disk => {
                     let n = f.disk.disks.len();
@@ -625,17 +1050,20 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                         stat(ui, "Lesen", f.disk.read_bps.map(|v| format::rate_de(v, 1)).unwrap_or("–".into()));
                         stat(ui, "Schreiben", f.disk.write_bps.map(|v| format::rate_de(v, 1)).unwrap_or("–".into()));
                     });
+                    disk_list(ui, &f.disk.disks);
                 }
                 Item::DiskOne(i) => {
                     if let (Some(d), Some(hd)) = (f.disk.disks.iter().find(|d| d.index == i), h.disks.iter().find(|x| x.index == i)) {
-                        disk_page(ui, w, &d.title(), d.info.model.as_deref().unwrap_or(""), &hd.active, &hd.read, &hd.write, |ui| {
+                        disk_page(ui, w, &d.title(), &format!("Datenträger {}", d.index), &hd.active, &hd.read, &hd.write, |ui| {
                             stat(ui, "Aktive Zeit", format::pct0(d.active_pct));
                             stat(ui, "Lesen", d.read_bps.map(|v| format::rate_de(v, 1)).unwrap_or("–".into()));
                             stat(ui, "Schreiben", d.write_bps.map(|v| format::rate_de(v, 1)).unwrap_or("–".into()));
                             stat(ui, "Typ", d.info.kind.clone().unwrap_or("–".into()));
                             stat(ui, "Kapazität", d.capacity.map(|c| format::mem(c, crate::config::MemUnit::GB, 0)).unwrap_or("–".into()));
+                            stat(ui, "Temperatur", d.temp_c.map(temp_text).unwrap_or("–".into()));
                             stat(ui, "Laufwerke", if d.letters.is_empty() { "–".into() } else { d.letters.join(" ") });
                         });
+                        disk_cards(ui, w, d);
                     }
                 }
                 Item::Net => {
@@ -691,6 +1119,10 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                     ui.horizontal_wrapped(|ui| {
                         stat(ui, "Auslastung", format::pct0(f.gpu.total_pct.or(b.gpu.load_pct)));
                         stat(ui, "Temperatur", format::temp(b.gpu.temp_c));
+                        if b.gpu.hotspot_c.is_some() || b.gpu.mem_temp_c.is_some() {
+                            stat(ui, "Hot-Spot", format::temp(b.gpu.hotspot_c));
+                            stat(ui, "Speichertemperatur", format::temp(b.gpu.mem_temp_c));
+                        }
                         stat(ui, "GPU-Takt", b.gpu.clock_mhz.map(|m| format!("{m:.0} MHz")).unwrap_or("–".into()));
                         stat(ui, "Speichertakt", b.gpu.mem_clock_mhz.map(|m| format!("{m:.0} MHz")).unwrap_or("–".into()));
                         stat(
@@ -712,9 +1144,23 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                             stat(ui, "Chip", format!("{} {}", ad.vendor_name(), ad.name.trim_start_matches(ad.vendor_name()).trim()));
                             stat(ui, "Kartenhersteller", ad.board_vendor().map(String::from).unwrap_or_else(|| format!("unbekannt ({:04X})", ad.subsys_id & 0xFFFF)));
                             stat(ui, "Treiber", ad.driver_display().unwrap_or("–".into()));
+                            stat(ui, "PCIe-Verbindung", f.gpu_link.map(|l| format!("PCIe {}", l.short())).unwrap_or("–".into()));
                         });
                         ui.label(RichText::new(format!("PCI {} · Quelle: {}", ad.pci_id(), b.gpu.source.clone().unwrap_or_default())).small().weak());
                     }
+                    // Hinweis, warum Hot-Spot/Speichertemperatur fehlen (nur NVIDIA)
+                    if b.gpu.hotspot_c.is_none() && b.gpu.mem_temp_c.is_none() && b.gpu.source.as_deref().map(|s| s.contains("NVML")).unwrap_or(false) {
+                        ui.label(
+                            RichText::new(if cfg!(windows) {
+                                "Hot-Spot (RTX 50) und Speichertemperatur (RTX 30–50) gibt es nur mit Adminrechten und PawnIO – NVIDIA meldet sie nicht über die offizielle Schnittstelle."
+                            } else {
+                                "Hot-Spot und Speichertemperatur meldet der NVIDIA-Treiber unter Linux nicht."
+                            })
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    spec_view(ui, w, "gpu", &f.gpu_spec, C_GPU);
                 }
             }
             ui.add_space(10.0);

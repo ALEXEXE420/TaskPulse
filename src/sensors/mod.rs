@@ -2,12 +2,18 @@
 
 pub mod cpu;
 pub mod cputemp;
+pub mod dimm;
+pub mod nvtemp;
+pub mod spec;
+pub mod startup;
 pub mod gpu;
 pub mod gpu_proc;
 pub mod mem;
 pub mod net;
 pub mod nvgpu;
+#[cfg(windows)]
 pub mod pdh;
+pub mod sysfs;
 pub mod procs;
 pub mod topology;
 pub mod fps;
@@ -36,6 +42,14 @@ pub struct BasicSensors {
     temp: Option<cputemp::CpuTemp>,
     temp_status: cputemp::TempStatus,
     temp_retry: u32,
+    /// Sensoren auf den Speicherriegeln (SMBus); einmal gesucht
+    ram: Option<dimm::RamSensors>,
+    ram_tried: bool,
+    /// Timings ändern sich im Betrieb nicht → einmal lesen
+    ram_timings: Option<Vec<dimm::Timings>>,
+    /// NVIDIA: Hot-Spot und Speichertemperatur über PawnIO
+    nvreg: Option<nvtemp::NvRegTemps>,
+    nvreg_tried: bool,
     net: net::Net,
     gpu: gpu::Gpu,
 }
@@ -43,7 +57,7 @@ pub struct BasicSensors {
 impl BasicSensors {
     pub fn new(cfg: &Config) -> BasicSensors {
         let (temp, temp_status) = open_temp(cfg);
-        BasicSensors { cpu: cpu::Cpu::new(), temp, temp_status, temp_retry: 0, net: net::Net::new(), gpu: gpu::Gpu::new(&cfg.gpu_adapter) }
+        BasicSensors { cpu: cpu::Cpu::new(), temp, temp_status, temp_retry: 0, ram: None, ram_tried: false, ram_timings: None, nvreg: None, nvreg_tried: false, net: net::Net::new(), gpu: gpu::Gpu::new(&cfg.gpu_adapter) }
     }
 
     pub fn sample(&mut self, cfg: &Config) -> Basic {
@@ -69,6 +83,21 @@ impl BasicSensors {
         let net = self.net.sample(&cfg.net_adapter);
         let line_up_pct = net.up_bps.and_then(|b| format::line_usage_pct(b, cfg.line_up_mbit));
         let line_down_pct = net.down_bps.and_then(|b| format::line_usage_pct(b, cfg.line_down_mbit));
+        let mut gpu = self.gpu.sample();
+        // NVIDIA: Hot-Spot und Speichertemperatur (nur mit PawnIO/Adminrechten; sonst wird nichts versucht)
+        let pawnio_ok = cfg.use_pawnio && self.temp.is_some();
+        if !pawnio_ok {
+            self.nvreg = None;
+            self.nvreg_tried = false;
+        } else if !self.nvreg_tried && gpu.source.as_deref().map(|s| s.contains("NVML")).unwrap_or(false) {
+            self.nvreg_tried = true;
+            self.nvreg = nvgpu::NvGpu::new().and_then(|n| n.bus_id()).and_then(|id| nvtemp::NvRegTemps::open(&id));
+        }
+        if let Some(r) = &self.nvreg {
+            let t = r.read();
+            gpu.hotspot_c = t.hotspot_c;
+            gpu.mem_temp_c = t.mem_max_c;
+        }
         Basic {
             cpu,
             cpu_freq_mhz,
@@ -79,7 +108,7 @@ impl BasicSensors {
             net,
             line_up_pct,
             line_down_pct,
-            gpu: self.gpu.sample(),
+            gpu,
         }
     }
 }
@@ -88,6 +117,35 @@ impl BasicSensors {
     /// Watt und Spannung je physischem Kern (nur mit PawnIO/Adminrechten; sonst leer).
     pub fn per_core(&mut self, cores: &[Vec<usize>]) -> Vec<cputemp::CoreReading> {
         self.temp.as_mut().map(|t| t.per_core(cores)).unwrap_or_default()
+    }
+
+    /// Laufende RAM-Timings je Kanal (AMD mit PawnIO; einmal gelesen).
+    pub fn ram_timings(&mut self) -> Vec<dimm::Timings> {
+        if self.ram_timings.is_none() {
+            if let Some(t) = self.temp.as_ref() {
+                let v = t.ram_timings();
+                crate::diag::log(format!("RAM-Timings: {} Kanäle gelesen", v.len()));
+                self.ram_timings = Some(v);
+            }
+        }
+        self.ram_timings.clone().unwrap_or_default()
+    }
+
+    /// Temperatur der Speicherriegel (SMBus, nur mit PawnIO; abschaltbar).
+    pub fn dimm_temps(&mut self, cfg: &Config) -> Vec<dimm::DimmTemp> {
+        let allowed = cfg.ram_sensors && (cfg!(not(windows)) || (cfg.use_pawnio && self.temp.is_some()));
+        if !allowed {
+            self.ram = None;
+            self.ram_tried = false;
+            return Vec::new();
+        }
+        if !self.ram_tried {
+            self.ram_tried = true;
+            let intel = cputemp::cpu_info().vendor.contains("Intel");
+            self.ram = dimm::RamSensors::open(intel);
+            crate::diag::log(format!("RAM-Sensoren: {}", if self.ram.is_some() { "gefunden" } else { "keine gefunden" }));
+        }
+        self.ram.as_ref().map(|r| r.temps()).unwrap_or_default()
     }
 
     /// AMD: Temperatur je CCD (nur mit PawnIO).

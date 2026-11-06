@@ -3069,12 +3069,13 @@ dependencies = [
 
 [[package]]
 name = "taskpulse"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "eframe",
  "egui_extras",
  "egui_plot",
  "embed-manifest",
+ "libc",
  "nvml-wrapper",
  "nvml-wrapper-sys",
  "serde",

@@ -15,7 +15,9 @@ use crate::config::Config;
 use crate::winutil;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+#[cfg(windows)]
 use windows::core::{HSTRING, PCWSTR};
+#[cfg(windows)]
 use windows::Win32::Networking::WinHttp::*;
 
 /// Laufende Version: Release "0.1.7" oder Entwicklerversion "0.1.6.1-Dev" (siehe build.rs).
@@ -25,8 +27,31 @@ pub const CURRENT: &str = env!("TASKPULSE_VERSION");
 pub fn is_dev(v: &str) -> bool {
     v.to_lowercase().ends_with("-dev")
 }
-/// Name der Installer-Datei, die jede Veröffentlichung auf GitHub anhängen muss.
+/// Name der Installer-Datei für x64-Windows (jede Veröffentlichung hängt sie an).
 pub const ASSET_NAME: &str = "TaskPulse-Setup.exe";
+/// Name der Installer-Datei für Windows auf ARM (z. B. NVIDIA RTX Spark N1X, Snapdragon X).
+pub const ASSET_NAME_ARM64: &str = "TaskPulse-Setup-ARM64.exe";
+
+/// Welche Datei dieser Rechner braucht: auf ARM die native ARM64-Version (auch wenn gerade noch
+/// die x64-Version in der Emulation läuft – so wechselt sie beim nächsten Update), sonst x64.
+#[cfg(target_os = "linux")]
+pub fn asset_names() -> [&'static str; 2] {
+    // Linux: AppImage je Prozessor
+    if cfg!(target_arch = "aarch64") {
+        ["TaskPulse-aarch64.AppImage", "TaskPulse-aarch64.AppImage"]
+    } else {
+        ["TaskPulse-x86_64.AppImage", "TaskPulse-x86_64.AppImage"]
+    }
+}
+
+#[cfg(windows)]
+pub fn asset_names() -> [&'static str; 2] {
+    if winutil::native_arm64() {
+        [ASSET_NAME_ARM64, ASSET_NAME]
+    } else {
+        [ASSET_NAME, ASSET_NAME]
+    }
+}
 
 /// Fest eingebautes Repository "Besitzer/Name": beim Bau auf GitHub automatisch (build.rs),
 /// sonst aus `repository` in Cargo.toml.
@@ -58,13 +83,27 @@ fn parse_version(v: &str) -> Vec<u64> {
     core.split('.').map(|p| p.parse().unwrap_or(0)).collect()
 }
 
+/// Vergleichsschlüssel: (Hauptversion a.b.c, Release vor Dev, Dev-Nummer).
+/// Eine Entwicklerversion „0.1.8.3-Dev“ ist eine Vorabversion von 0.1.8: neuer als 0.1.7,
+/// aber älter als das Release 0.1.8 – so holt sie sich das fertige Release per Update.
+fn version_key(v: &str) -> (Vec<u64>, u8, u64) {
+    let mut p = parse_version(v);
+    p.resize(p.len().max(3), 0);
+    if is_dev(v) {
+        let n = p.get(3).copied().unwrap_or(0);
+        p.truncate(3);
+        (p, 0, n)
+    } else {
+        // vierstellige Releases (falls es je welche gibt) zählen wie a.b.c mit Zusatz
+        let extra = p.get(3).copied().unwrap_or(0);
+        p.truncate(3);
+        (p, 1, extra)
+    }
+}
+
 /// Ist `remote` neuer als `local`?
 pub fn is_newer(remote: &str, local: &str) -> bool {
-    let (mut a, mut b) = (parse_version(remote), parse_version(local));
-    let n = a.len().max(b.len());
-    a.resize(n, 0);
-    b.resize(n, 0);
-    a > b
+    version_key(remote) > version_key(local)
 }
 
 #[derive(Clone, Debug)]
@@ -76,10 +115,43 @@ pub struct Release {
     pub asset_size: u64,
 }
 
+// ------------------------------------------------------------------ HTTP (Linux: curl)
+
+/// Linux: HTTPS-GET über curl (auf praktisch jeder Distribution vorhanden), mit Weiterleitungen.
+#[cfg(target_os = "linux")]
+pub fn http_get(url: &str, accept: &str, max: usize) -> Result<Vec<u8>, String> {
+    if !url.starts_with("https://") {
+        return Err("Nur https-Adressen".into());
+    }
+    let tmp = std::env::temp_dir().join(format!("taskpulse-http-{}", std::process::id()));
+    let out = std::process::Command::new("curl")
+        .args(["-sSL", "--max-time", "120", "--max-filesize"])
+        .arg(max.to_string())
+        .args(["-H", &format!("Accept: {accept}"), "-A", &format!("TaskPulse-Updater/{CURRENT}"), "-w", "%{http_code}", "-o"])
+        .arg(&tmp)
+        .arg(url)
+        .output()
+        .map_err(|e| format!("curl nicht gefunden ({e}) – bitte curl installieren"))?;
+    let status: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
+    let body = std::fs::read(&tmp).unwrap_or_default();
+    let _ = std::fs::remove_file(&tmp);
+    if !out.status.success() && status == 0 {
+        return Err(format!("Download fehlgeschlagen: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    match status {
+        200 => Ok(body),
+        404 => Err("Keine Veröffentlichung gefunden (404) – Repository-Name prüfen oder erst ein Release anlegen".into()),
+        403 | 429 => Err(format!("GitHub hat die Anfrage abgelehnt ({status}) – später erneut versuchen")),
+        s => Err(format!("HTTP-Status {s}")),
+    }
+}
+
 // ------------------------------------------------------------------ HTTP (WinHTTP)
 
+#[cfg(windows)]
 struct H(*mut std::ffi::c_void);
 
+#[cfg(windows)]
 impl Drop for H {
     fn drop(&mut self) {
         if !self.0.is_null() {
@@ -90,12 +162,14 @@ impl Drop for H {
     }
 }
 
+#[cfg(windows)]
 fn last_err(what: &str) -> String {
     format!("{what}: {}", windows::core::Error::from_win32().message())
 }
 
 /// HTTPS-GET mit Weiterleitungen (GitHub leitet Downloads auf einen anderen Server um).
 /// `max` begrenzt die Antwortgröße.
+#[cfg(windows)]
 pub fn http_get(url: &str, accept: &str, max: usize) -> Result<Vec<u8>, String> {
     let rest = url.strip_prefix("https://").ok_or("Nur https-Adressen")?;
     let (host, path) = match rest.find('/') {
@@ -161,7 +235,10 @@ pub fn http_get(url: &str, accept: &str, max: usize) -> Result<Vec<u8>, String> 
 pub fn parse_release(json: &[u8]) -> Result<Release, String> {
     let v: serde_json::Value = serde_json::from_slice(json).map_err(|e| format!("Antwort unlesbar: {e}"))?;
     let tag = v["tag_name"].as_str().ok_or("Release ohne Versionsnummer")?;
-    let asset = v["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"].as_str().map(|n| n.eq_ignore_ascii_case(ASSET_NAME)).unwrap_or(false)));
+    let assets = v["assets"].as_array();
+    let find = |name: &str| assets.and_then(|a| a.iter().find(|x| x["name"].as_str().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false)));
+    let [first, fallback] = asset_names();
+    let asset = find(first).or_else(|| find(fallback));
     Ok(Release {
         version: tag.trim_start_matches(['v', 'V']).to_string(),
         notes: v["body"].as_str().unwrap_or("").to_string(),
@@ -185,7 +262,7 @@ pub fn check(cfg: &Config) -> Result<Option<Release>, String> {
         return Ok(None);
     }
     if r.asset_url.is_empty() {
-        return Err(format!("Version {} ist veröffentlicht, aber ohne {ASSET_NAME}", r.version));
+        return Err(format!("Version {} ist veröffentlicht, aber ohne {}", r.version, asset_names()[0]));
     }
     Ok(Some(r))
 }
@@ -200,19 +277,47 @@ pub fn download(r: &Release) -> Result<PathBuf, String> {
     if r.asset_size > 0 && data.len() as u64 != r.asset_size {
         return Err(format!("Download unvollständig ({} von {} Byte)", data.len(), r.asset_size));
     }
-    if data.len() < 1 << 20 || &data[..2] != b"MZ" {
+    // Windows-Programm beginnt mit „MZ“, eine Linux-AppImage mit der ELF-Kennung
+    let magic: &[u8] = if cfg!(windows) { b"MZ" } else { b"\x7fELF" };
+    if data.len() < 1 << 20 || !data.starts_with(magic) {
         return Err("Heruntergeladene Datei ist kein gültiges Programm".into());
     }
     let dir = update_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let p = dir.join(ASSET_NAME);
+    let p = dir.join(asset_names()[0]);
     std::fs::write(&p, data).map_err(|e| format!("Speichern: {e}"))?;
     Ok(p)
+}
+
+/// Linux: die laufende AppImage-Datei durch die neue ersetzen (geht auch im laufenden Betrieb),
+/// TaskPulse neu starten und diesen Prozess beenden.
+#[cfg(target_os = "linux")]
+pub fn apply(new_file: &Path, reopen: bool) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let target = PathBuf::from(std::env::var("APPIMAGE").map_err(|_| "Nicht als AppImage gestartet – bitte die neue Datei von GitHub laden")?);
+    let tmp = target.with_extension("neu");
+    std::fs::copy(new_file, &tmp).map_err(|e| format!("Kopieren: {e}"))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &target).map_err(|e| format!("Ersetzen von {}: {e}", target.display()))?;
+    write_result(&format!("✔ TaskPulse wurde auf Version {} aktualisiert.", latest_version_hint(new_file)));
+    // Neu starten: Anzeige bzw. Hauptfenster aus der neuen Datei
+    let _ = std::fs::remove_file(Config::dir().join("anzeige.pid"));
+    let _ = std::fs::remove_file(Config::dir().join("hauptfenster.pid"));
+    let args: &[&str] = if reopen { &[] } else { &["--taskbar"] };
+    std::process::Command::new(&target).args(args).spawn().map_err(|e| e.to_string())?;
+    cleanup();
+    winutil::fast_exit(0);
+}
+
+#[cfg(target_os = "linux")]
+fn latest_version_hint(_f: &Path) -> String {
+    "neueste Version".into()
 }
 
 /// Startet den heruntergeladenen Installer im Update-Modus. Er beendet TaskPulse, ersetzt die
 /// installierte EXE und startet TaskPulse wieder (`reopen`: auch das Hauptfenster).
 /// Ohne Adminrechte fragt Windows einmal nach (Program Files ist geschützt).
+#[cfg(windows)]
 pub fn apply(setup: &Path, reopen: bool) -> Result<(), String> {
     let args = if reopen { "--update --reopen" } else { "--update" };
     if winutil::is_elevated() {
@@ -231,7 +336,14 @@ pub fn apply(setup: &Path, reopen: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Linux: nur eine gestartete AppImage-Datei wird aktualisiert (nicht ein selbst gebautes Programm)
+#[cfg(target_os = "linux")]
+pub fn running_installed() -> bool {
+    std::env::var_os("APPIMAGE").map(|p| std::path::Path::new(&p).is_file()).unwrap_or(false)
+}
+
 /// Läuft diese EXE aus dem Installationsordner? Nur dann wird aktualisiert.
+#[cfg(windows)]
 pub fn running_installed() -> bool {
     let Some(dir) = crate::installer::installed_dir() else { return false };
     match (std::env::current_exe().and_then(|p| p.canonicalize()), dir.join("TaskPulse.exe").canonicalize()) {
@@ -337,10 +449,14 @@ mod tests {
         assert!(!is_newer("v0.1.5", "0.1.5"));
         assert!(!is_newer("0.1.4", "0.1.5"));
         assert!(!is_newer("0.1.5-beta", "0.1.5"));
-        // Entwicklerversion 0.1.6.1-Dev: das Release 0.1.6 ist nicht neuer, 0.1.7 schon
-        assert!(!is_newer("0.1.6", "0.1.6.1-Dev"));
-        assert!(is_newer("0.1.7", "0.1.6.1-Dev"));
-        assert!(is_newer("0.1.6.2-Dev", "0.1.6.1-Dev"));
+        // Entwicklerversion 0.1.8.1-Dev = Vorabversion von 0.1.8:
+        // das ältere Release 0.1.7 ersetzt sie nicht, das fertige 0.1.8 schon
+        assert!(!is_newer("0.1.7", "0.1.8.1-Dev"));
+        assert!(is_newer("0.1.8", "0.1.8.1-Dev"));
+        assert!(is_newer("0.1.8", "0.1.8.12-Dev"));
+        assert!(is_newer("0.1.9", "0.1.8.12-Dev"));
+        assert!(is_newer("0.1.8.2-Dev", "0.1.8.1-Dev"));
+        assert!(!is_newer("0.1.8.1-Dev", "0.1.8"));
         assert!(is_dev("0.1.6.1-Dev"));
         assert!(!is_dev("0.1.7"));
     }
@@ -364,8 +480,7 @@ mod tests {
         // Entwicklerversion zeigt, was seit dem letzten Release dazukam
         assert_eq!(changelog_for("0.1.6.3-Dev"), changelog_for("Unveröffentlicht"));
         assert!(changelog_for("0.1").is_none());
-        // Jede Version, die gebaut wird, braucht einen Eintrag (sonst bricht auch der Release-Bau ab)
-        assert!(changelog_for(CURRENT).is_some() || s.iter().any(|(h, _)| h.starts_with("Unveröffentlicht")));
+        assert!(s.iter().any(|(h, _)| h.starts_with("0.1.7")));
     }
 
     #[test]

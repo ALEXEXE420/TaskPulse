@@ -12,27 +12,44 @@
 //!
 //! Braucht Adminrechte (oder die Gruppe „Leistungsprotokollbenutzer“).
 
-use std::collections::{HashMap, VecDeque};
+#[cfg(windows)]
+use std::collections::HashMap;
+use std::collections::VecDeque;
+#[cfg(windows)]
 use std::sync::{Mutex, OnceLock};
+#[cfg(windows)]
 use windows::core::{GUID, PCWSTR, PWSTR};
+#[cfg(windows)]
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
+#[cfg(windows)]
 use windows::Win32::System::Diagnostics::Etw::*;
 
+#[cfg(windows)]
 const SESSION: &str = "TaskPulse-FPS";
 
+#[cfg(windows)]
 const DXGI: GUID = GUID::from_u128(0xCA11C036_0102_4A2D_A6AD_F03CFED5D3C9);
+#[cfg(windows)]
 const D3D9: GUID = GUID::from_u128(0x783ACA0A_790E_4D7F_8451_AA850511C6B9);
+#[cfg(windows)]
 const DXGKRNL: GUID = GUID::from_u128(0x802EC45A_1E99_4B83_9920_87C98277BA9D);
 
+#[cfg(windows)]
 const DXGI_PRESENT_START: u16 = 0x2A;
+#[cfg(windows)]
 const D3D9_PRESENT_START: u16 = 0x01;
+#[cfg(windows)]
 const KRNL_PRESENT_HISTORY_START: u16 = 0xAB;
+#[cfg(windows)]
 const KRNL_PRESENT_HISTORY_DETAILED_START: u16 = 0xD7;
+#[cfg(windows)]
 const KRNL_PRESENT_INFO: u16 = 0xB8;
 
+#[cfg(windows)]
 /// DxgKrnl nur mit den Schlüsselwörtern Base (0x1) und Present (0x8000000) – sonst sehr viele Ereignisse.
 const KRNL_KEYWORDS: u64 = 0x0000_0000_0800_0001;
 
+#[cfg(windows)]
 /// Zeitstempel der letzten Bilder je Prozess (QPC-Ticks).
 #[derive(Default)]
 struct PidFrames {
@@ -51,6 +68,7 @@ pub enum Clock {
     FileTime,
 }
 
+#[cfg(windows)]
 #[derive(Default)]
 struct Shared {
     clock: Option<Clock>,
@@ -61,11 +79,13 @@ struct Shared {
     pids: HashMap<u32, PidFrames>,
 }
 
+#[cfg(windows)]
 fn shared() -> &'static Mutex<Shared> {
     static S: OnceLock<Mutex<Shared>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(Shared::default()))
 }
 
+#[cfg(windows)]
 fn qpc_freq() -> f64 {
     static F: OnceLock<f64> = OnceLock::new();
     *F.get_or_init(|| {
@@ -77,6 +97,7 @@ fn qpc_freq() -> f64 {
     })
 }
 
+#[cfg(windows)]
 fn filetime_now() -> i64 {
     let ft = unsafe { windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime() };
     ((ft.dwHighDateTime as i64) << 32) | ft.dwLowDateTime as i64
@@ -91,6 +112,7 @@ pub fn detect_clock(ts: i64, qpc_now: i64, filetime_now: i64) -> Clock {
     }
 }
 
+#[cfg(windows)]
 fn qpc_now() -> i64 {
     let mut t = 0i64;
     unsafe {
@@ -99,9 +121,11 @@ fn qpc_now() -> i64 {
     t
 }
 
+#[cfg(windows)]
 /// Höchstens so viele Zeitstempel je Prozess behalten (≈ 4 s bei 1000 FPS)
 const KEEP: usize = 4000;
 
+#[cfg(windows)]
 unsafe extern "system" fn on_event(rec: *mut EVENT_RECORD) {
     let Some(r) = rec.as_ref() else { return };
     let h = &r.EventHeader;
@@ -126,6 +150,7 @@ unsafe extern "system" fn on_event(rec: *mut EVENT_RECORD) {
     }
 }
 
+#[cfg(windows)]
 fn props_buffer() -> Vec<u8> {
     let name: Vec<u16> = SESSION.encode_utf16().chain(std::iter::once(0)).collect();
     let base = std::mem::size_of::<EVENT_TRACE_PROPERTIES>();
@@ -146,6 +171,7 @@ fn props_buffer() -> Vec<u8> {
     buf
 }
 
+#[cfg(windows)]
 fn stop_session() {
     let mut buf = props_buffer();
     let name: Vec<u16> = SESSION.encode_utf16().chain(std::iter::once(0)).collect();
@@ -154,14 +180,17 @@ fn stop_session() {
     }
 }
 
+#[cfg(windows)]
 /// Laufende Messung; beim Fallenlassen wird die Sitzung beendet.
 pub struct FpsTrace {
     handle: CONTROLTRACE_HANDLE,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(windows)]
 unsafe impl Send for FpsTrace {}
 
+#[cfg(windows)]
 impl FpsTrace {
     /// Startet die Ereignissitzung. Fehler als lesbarer Text (z. B. fehlende Adminrechte).
     pub fn start() -> Result<FpsTrace, String> {
@@ -243,6 +272,7 @@ impl FpsTrace {
     }
 }
 
+#[cfg(windows)]
 impl Drop for FpsTrace {
     fn drop(&mut self) {
         self.shutdown();
@@ -291,11 +321,13 @@ pub fn window_end(now: i64, latest: i64, freq: f64) -> i64 {
     by_clock.min(latest - (0.25 * freq) as i64)
 }
 
+#[cfg(windows)]
 /// Wie viele Grafik-Ereignisse bisher ankamen (0 nach einigen Sekunden = Sitzung empfängt nichts).
 pub fn event_count() -> u64 {
     shared().lock().map(|s| s.events).unwrap_or(0)
 }
 
+#[cfg(windows)]
 pub fn snapshot(exclude: &[u32]) -> Vec<FpsSample> {
     let Ok(s) = shared().lock() else { return Vec::new() };
     let (freq, now) = match s.clock {
@@ -321,6 +353,30 @@ pub fn snapshot(exclude: &[u32]) -> Vec<FpsSample> {
         .collect();
     out.sort_by(|a, b| b.fps.total_cmp(&a.fps));
     out
+}
+
+// ------------------------------------------------------------------ Linux: (noch) keine FPS-Messung
+// Unter Linux gibt es kein ETW. Ein Weg ohne Eingriff ins Spiel wird für eine spätere Version geprüft.
+
+#[cfg(target_os = "linux")]
+pub struct FpsTrace;
+
+#[cfg(target_os = "linux")]
+impl FpsTrace {
+    pub fn start() -> Result<FpsTrace, String> {
+        Err("FPS-Messung gibt es unter Linux noch nicht".into())
+    }
+    pub fn stop(self) {}
+}
+
+#[cfg(target_os = "linux")]
+pub fn event_count() -> u64 {
+    0
+}
+
+#[cfg(target_os = "linux")]
+pub fn snapshot(_exclude: &[u32]) -> Vec<FpsSample> {
+    Vec::new()
 }
 
 /// Kennzahlen über eine ganze Aufzeichnung: (Ø FPS, 1 % Low, 0,1 % Low) aus allen Frametimes.
@@ -429,6 +485,7 @@ mod tests {
         assert_eq!(detect_clock(ft - 5_000_000, qpc, ft), Clock::FileTime);
     }
 
+    #[cfg(windows)]
     #[test]
     fn provider_guids() {
         assert_eq!(format!("{:?}", DXGI), "CA11C036-0102-4A2D-A6AD-F03CFED5D3C9");

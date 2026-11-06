@@ -19,6 +19,9 @@ pub struct Sample {
     pub cpu_w: Option<f64>,
     pub gpu_load: Option<f64>,
     pub gpu_temp: Option<f64>,
+    /// NVIDIA: Hot-Spot und heißester Speicherchip (mit Adminrechten)
+    pub gpu_hotspot: Option<f64>,
+    pub gpu_mem_temp: Option<f64>,
     pub gpu_ghz: Option<f64>,
     pub gpu_w: Option<f64>,
     pub ram: Option<f64>,
@@ -45,6 +48,8 @@ impl Sample {
             cpu_w: b.cpu_power_w,
             gpu_load: f.gpu.total_pct.or(b.gpu.load_pct),
             gpu_temp: b.gpu.temp_c,
+            gpu_hotspot: b.gpu.hotspot_c,
+            gpu_mem_temp: b.gpu.mem_temp_c,
             gpu_ghz: b.gpu.clock_mhz.map(|m| m / 1000.0),
             gpu_w: b.gpu.power_w,
             ram: b.mem.used_pct,
@@ -139,7 +144,14 @@ impl BenchState {
     }
 }
 
+/// Fenster im Vordergrund → Prozess-ID (Linux: nicht allgemein ermittelbar → 0)
+#[cfg(target_os = "linux")]
+fn foreground_pid() -> u32 {
+    0
+}
+
 /// Fenster im Vordergrund → Prozess-ID
+#[cfg(windows)]
 fn foreground_pid() -> u32 {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
     let mut pid = 0u32;
@@ -164,6 +176,8 @@ const MAX_SAMPLES: usize = 12 * 3600;
 
 const C_CPU: Color32 = Color32::from_rgb(17, 125, 187);
 const C_GPU: Color32 = Color32::from_rgb(10, 160, 130);
+const C_GPU_HOT: Color32 = Color32::from_rgb(230, 90, 60);
+const C_GPU_MEM: Color32 = Color32::from_rgb(220, 190, 60);
 const C_RAM: Color32 = Color32::from_rgb(160, 60, 200);
 const C_VRAM: Color32 = Color32::from_rgb(230, 150, 40);
 const C_FPS: Color32 = Color32::from_rgb(120, 200, 80);
@@ -405,7 +419,7 @@ fn nice_ceiling(v: f64) -> f64 {
 
 /// Spalten der Exporte: (Name, Beschreibung, Wert)
 type Col = (&'static str, &'static str, fn(&Sample) -> Option<f64>);
-const COLS: [Col; 14] = [
+const COLS: [Col; 16] = [
     ("fps", "Bildrate des Spiels in Bildern pro Sekunde (braucht Adminrechte)", |s| s.fps),
     ("frametime_ms", "Durchschnittliche Zeit pro Bild in dieser Sekunde, ms", |s| s.ft_avg),
     ("frametime_max_ms", "Längstes Bild dieser Sekunde, ms", |s| s.ft_max),
@@ -416,6 +430,8 @@ const COLS: [Col; 14] = [
     ("cpu_watt", "CPU-Leistungsaufnahme in Watt (Package, braucht Adminrechte)", |s| s.cpu_w),
     ("gpu_last_prozent", "GPU-Auslastung in %", |s| s.gpu_load),
     ("gpu_temp_c", "GPU-Temperatur in °C", |s| s.gpu_temp),
+    ("gpu_hotspot_c", "GPU-Hot-Spot in °C (heißeste Stelle des Chips, NVIDIA RTX 50, braucht Adminrechte)", |s| s.gpu_hotspot),
+    ("gpu_speicher_c", "Temperatur des heißesten Grafikspeicher-Chips in °C (NVIDIA RTX 30–50, braucht Adminrechte)", |s| s.gpu_mem_temp),
     ("gpu_takt_ghz", "GPU-Kerntakt in GHz", |s| s.gpu_ghz),
     ("gpu_watt", "GPU-Leistungsaufnahme in Watt", |s| s.gpu_w),
     ("ram_prozent", "Belegter Arbeitsspeicher in %", |s| s.ram),
@@ -578,6 +594,8 @@ fn csv_text(samples: &[Sample]) -> String {
             f(s.cpu_w),
             f(s.gpu_load),
             f(s.gpu_temp),
+            f(s.gpu_hotspot),
+            f(s.gpu_mem_temp),
             f(s.gpu_ghz),
             f(s.gpu_w),
             f(s.ram),
@@ -593,20 +611,14 @@ fn csv_text(samples: &[Sample]) -> String {
     format!("\u{feff}{out}")
 }
 
-fn local_time() -> windows::Win32::Foundation::SYSTEMTIME {
-    unsafe { windows::Win32::System::SystemInformation::GetLocalTime() }
-}
-
 /// Für Dateinamen: "2026-11-06_14-03-22"
 fn file_stamp() -> String {
-    let t = local_time();
-    format!("{:04}-{:02}-{:02}_{:02}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
+    crate::diag::stamp()
 }
 
 /// Zum Lesen: "06.11.2026 14:03:22"
 fn now_text() -> String {
-    let t = local_time();
-    format!("{:02}.{:02}.{:04} {:02}:{:02}:{:02}", t.wDay, t.wMonth, t.wYear, t.wHour, t.wMinute, t.wSecond)
+    crate::diag::now_text()
 }
 
 pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
@@ -683,7 +695,8 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
         ui.label(RichText::new(m).weak());
     }
     if !app.admin {
-        ui.label(RichText::new("Ohne Adminrechte fehlen FPS, CPU-Temperatur und CPU-Watt.").small().color(Color32::from_rgb(200, 140, 0)));
+        let hint = if cfg!(windows) { "Ohne Adminrechte fehlen FPS, CPU-Temperatur und CPU-Watt." } else { "Unter Linux: FPS noch nicht verfügbar; CPU-Watt nur mit root." };
+        ui.label(RichText::new(hint).small().color(Color32::from_rgb(200, 140, 0)));
     } else if let Some(e) = &st.fps_error {
         ui.label(RichText::new(format!("FPS: {e}")).small().color(Color32::from_rgb(200, 140, 0)));
     }
@@ -715,7 +728,15 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.set_max_width(ui.available_width());
         let ccds = samples.iter().map(|s| s.ccd.len()).max().unwrap_or(0);
-        let mut temps: Vec<Series> = [series(samples, "CPU", C_CPU, |s| s.cpu_temp), series(samples, "GPU", C_GPU, |s| s.gpu_temp)].into_iter().flatten().collect();
+        let mut temps: Vec<Series> = [
+            series(samples, "CPU", C_CPU, |s| s.cpu_temp),
+            series(samples, "GPU", C_GPU, |s| s.gpu_temp),
+            series(samples, "GPU Hot-Spot", C_GPU_HOT, |s| s.gpu_hotspot),
+            series(samples, "GPU-Speicher", C_GPU_MEM, |s| s.gpu_mem_temp),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         for i in 0..ccds {
             if let Some(s) = series(samples, &format!("CCD {}", i + 1), C_CCD[i % C_CCD.len()], move |x| x.ccd.get(i).copied()) {
                 temps.push(s);
@@ -829,7 +850,7 @@ mod tests {
         assert!(t.contains("zeit_s,fps,frametime_ms,frametime_max_ms,ruckler,cpu_last_prozent,cpu_temp_c,"));
         assert!(t.contains(",ccd1_temp_c,ccd2_temp_c\n"));
         // fehlende Werte = leere Zellen, Punkt als Dezimalzeichen
-        assert!(t.contains("\n0.0,,,,,12.50,,,,,40.00,,,,,45.25,41.00\n"));
+        assert!(t.contains("\n0.0,,,,,12.50,,,,,40.00,,,,,,,45.25,41.00\n"));
         assert!(t.contains("| cpu_last_prozent | 12.50 | 16.25 | 20.00 |"));
         assert!(t.contains("| cpu_temp_c | – | – | – |"));
         assert!(t.trim_end().ends_with("```"));

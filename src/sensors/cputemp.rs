@@ -5,17 +5,27 @@
 //! Intel (Core ab ca. 2. Generation): Package-Temperatur = TjMax − Abstand aus
 //! IA32_PACKAGE_THERM_STATUS, Energie über MSR_PKG_ENERGY_STATUS – wie Linux coretemp/RAPL.
 
+#[cfg(windows)]
 use windows::core::{s, HSTRING, PCSTR};
+#[cfg(windows)]
 use windows::Win32::Foundation::{HANDLE, HMODULE};
+#[cfg(windows)]
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
+#[cfg(windows)]
 static AMD_FAMILY17_MODULE: &[u8] = include_bytes!("../../resources/pawnio/AMDFamily17.bin");
+#[cfg(windows)]
 static INTEL_MSR_MODULE: &[u8] = include_bytes!("../../resources/pawnio/IntelMSR.bin");
 
+#[cfg(windows)]
 const MSR_IA32_THERM_STATUS: u64 = 0x19C;
+#[cfg(windows)]
 const MSR_IA32_TEMPERATURE_TARGET: u64 = 0x1A2;
+#[cfg(windows)]
 const MSR_IA32_PACKAGE_THERM_STATUS: u64 = 0x1B1;
+#[cfg(windows)]
 const MSR_RAPL_POWER_UNIT: u64 = 0x606;
+#[cfg(windows)]
 const MSR_PKG_ENERGY_STATUS: u64 = 0x611;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,15 +34,21 @@ pub enum Vendor {
     Intel,
 }
 
+#[cfg(windows)]
 const SMN_THM_TCON_CUR_TMP: u64 = 0x0005_9800;
+#[cfg(windows)]
 /// RAPL-Einheiten (Bits 12:8 = Energieeinheit 1/2^ESU Joule)
 const MSR_PWR_UNIT: u64 = 0xC001_0299;
+#[cfg(windows)]
 /// Aufsummierte Energie des gesamten Prozessors (32 Bit, läuft über)
 const MSR_PKG_ENERGY_STAT: u64 = 0xC001_029B;
+#[cfg(windows)]
 /// Aufsummierte Energie des Kerns, auf dem gelesen wird (AMD Zen, 32 Bit)
 const MSR_CORE_ENERGY_STAT: u64 = 0xC001_029A;
+#[cfg(windows)]
 /// Hardware-P-State-Status des Kerns: CurCpuVid in Bit 21:14 (AMD Zen)
 const MSR_HW_PSTATE_STATUS: u64 = 0xC001_0293;
+#[cfg(windows)]
 /// IA32_PERF_STATUS: aktuelle Kernspannung in Bit 47:32 (Einheit 1/8192 V, Intel)
 const MSR_IA32_PERF_STATUS: u64 = 0x198;
 
@@ -91,10 +107,12 @@ pub fn intel_core_volts(perf_status: u64) -> Option<f64> {
     (0.2..2.0).contains(&v).then_some(v)
 }
 
+#[cfg(windows)]
 /// Bindet den aufrufenden Thread für die Dauer eines Lesevorgangs an einen logischen Prozessor
 /// (MSRs gelten je Kern; PawnIO liest auf dem Prozessor, auf dem der Thread gerade läuft).
 struct PinGuard(Option<windows::Win32::System::SystemInformation::GROUP_AFFINITY>);
 
+#[cfg(windows)]
 impl PinGuard {
     fn pin(lp: usize) -> PinGuard {
         use windows::Win32::System::SystemInformation::GROUP_AFFINITY;
@@ -110,6 +128,7 @@ impl PinGuard {
     }
 }
 
+#[cfg(windows)]
 impl Drop for PinGuard {
     fn drop(&mut self) {
         if let Some(old) = self.0 {
@@ -120,10 +139,14 @@ impl Drop for PinGuard {
     }
 }
 
-type FnOpen = unsafe extern "system" fn(*mut HANDLE) -> i32;
-type FnLoad = unsafe extern "system" fn(HANDLE, *const u8, usize) -> i32;
-type FnExec = unsafe extern "system" fn(HANDLE, PCSTR, *const u64, usize, *mut u64, usize, *mut usize) -> i32;
-type FnClose = unsafe extern "system" fn(HANDLE) -> i32;
+#[cfg(windows)]
+pub(crate) type FnOpen = unsafe extern "system" fn(*mut HANDLE) -> i32;
+#[cfg(windows)]
+pub(crate) type FnLoad = unsafe extern "system" fn(HANDLE, *const u8, usize) -> i32;
+#[cfg(windows)]
+pub(crate) type FnExec = unsafe extern "system" fn(HANDLE, PCSTR, *const u64, usize, *mut u64, usize, *mut usize) -> i32;
+#[cfg(windows)]
+pub(crate) type FnClose = unsafe extern "system" fn(HANDLE) -> i32;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum TempStatus {
@@ -216,6 +239,7 @@ pub fn decode_tctl(raw: u32, offset: f64) -> f64 {
     t - offset
 }
 
+#[cfg(windows)]
 pub struct CpuTemp {
     handle: HANDLE,
     exec: FnExec,
@@ -233,9 +257,11 @@ pub struct CpuTemp {
 }
 
 // Der Handle wird nur vom Messthread benutzt.
+#[cfg(windows)]
 unsafe impl Send for CpuTemp {}
 
-fn pawnio_dll_path() -> Vec<String> {
+#[cfg(windows)]
+pub(crate) fn pawnio_dll_path() -> Vec<String> {
     let mut v = Vec::new();
     if let Some(pf) = std::env::var_os("ProgramFiles") {
         v.push(format!("{}\\PawnIO\\PawnIOLib.dll", pf.to_string_lossy()));
@@ -245,6 +271,7 @@ fn pawnio_dll_path() -> Vec<String> {
     v
 }
 
+#[cfg(windows)]
 impl CpuTemp {
     pub fn open() -> Result<CpuTemp, TempStatus> {
         // ARM-Prozessoren: PawnIO-Module gibt es nur für AMD/Intel (MSR/SMN)
@@ -318,7 +345,7 @@ impl CpuTemp {
         }
     }
 
-    fn read_smn(&self, addr: u64) -> Option<u32> {
+    pub(crate) fn read_smn(&self, addr: u64) -> Option<u32> {
         let input = [addr];
         let mut out = [0u64; 1];
         let mut ret = 0usize;
@@ -385,6 +412,29 @@ impl CpuTemp {
         out
     }
 
+    /// AMD: Rohwerte der UMC-Register (für den Diagnosebericht – zum Prüfen der Timings).
+    pub fn umc_raw(&self) -> Vec<(u64, Option<u32>)> {
+        if self.vendor != Vendor::Amd {
+            return Vec::new();
+        }
+        let mut v = Vec::new();
+        for ch in 0..2u64 {
+            for o in [0x200u64, 0x204, 0x208, 0x20C, 0x210, 0x214, 0x218, 0x260, 0x264, 0x268, 0x26C] {
+                let a = 0x50000 + ch * 0x100000 + o;
+                v.push((a, self.read_smn(a)));
+            }
+        }
+        v
+    }
+
+    /// AMD: laufende Speicher-Timings je Kanal aus dem Speichercontroller (UMC, nur lesen).
+    pub fn ram_timings(&self) -> Vec<super::dimm::Timings> {
+        if self.vendor != Vendor::Amd {
+            return Vec::new();
+        }
+        super::dimm::read_umc(self.family, |a| self.read_smn(a))
+    }
+
     /// AMD: Temperatur je CCD (nur die vorhandenen, in Hardware-Reihenfolge). Intel: leer.
     pub fn ccd_temps(&self) -> Vec<f64> {
         if self.vendor != Vendor::Amd {
@@ -415,6 +465,7 @@ impl CpuTemp {
     }
 }
 
+#[cfg(windows)]
 impl Drop for CpuTemp {
     fn drop(&mut self) {
         unsafe {
@@ -424,6 +475,98 @@ impl Drop for CpuTemp {
 }
 
 /// TjMax aus IA32_TEMPERATURE_TARGET (Bits 23:16), Rückfall 100 °C.
+// ------------------------------------------------------------------ Linux: hwmon und powercap (RAPL)
+//
+// Unter Linux liefert der Kernel die Sensoren selbst – ohne Treiber von Drittanbietern:
+// - AMD: hwmon „k10temp“ (Tctl/Tdie und Tccd1…Tccd8 je CCD), auch „zenpower“
+// - Intel: hwmon „coretemp“ („Package id 0“ und „Core N“ je Kern)
+// - CPU-Watt: /sys/class/powercap/intel-rapl:0/energy_uj (Intel und AMD ab Zen; seit Kernel 5.10
+//   nur für root lesbar – ohne root bleibt „–“)
+
+/// hwmon-Ordner und Etiketten → (Etikett, °C)
+#[allow(dead_code)]
+pub fn hwmon_temps(dir: &std::path::Path) -> Vec<(String, f64)> {
+    let mut v = Vec::new();
+    for i in 1..=64 {
+        let Some(milli) = super::sysfs::read_f64(dir.join(format!("temp{i}_input"))) else { continue };
+        let label = super::sysfs::read(dir.join(format!("temp{i}_label"))).unwrap_or_else(|| format!("temp{i}"));
+        v.push((label, milli / 1000.0));
+    }
+    v
+}
+
+#[cfg(target_os = "linux")]
+pub struct CpuTemp {
+    hwmon: std::path::PathBuf,
+    vendor: Vendor,
+    rapl: Option<std::path::PathBuf>,
+    rapl_max: u64,
+    last_energy: Option<(u64, std::time::Instant)>,
+}
+
+#[cfg(target_os = "linux")]
+impl CpuTemp {
+    pub fn open() -> Result<CpuTemp, TempStatus> {
+        let info = cpu_info();
+        let vendor = if info.vendor.contains("Intel") { Vendor::Intel } else { Vendor::Amd };
+        let hwmon = super::sysfs::dirs("/sys/class/hwmon")
+            .into_iter()
+            .find(|d| matches!(super::sysfs::read(d.join("name")).as_deref(), Some("k10temp") | Some("zenpower") | Some("coretemp")))
+            .ok_or(TempStatus::Unsupported)?;
+        let rapl = super::sysfs::dirs("/sys/class/powercap")
+            .into_iter()
+            .find(|d| d.file_name().map(|n| n.to_string_lossy() == "intel-rapl:0").unwrap_or(false) && d.join("energy_uj").exists());
+        let rapl_max = rapl.as_ref().and_then(|r| super::sysfs::read_u64(r.join("max_energy_range_uj"))).unwrap_or(u64::MAX);
+        Ok(CpuTemp { hwmon, vendor, rapl, rapl_max, last_energy: None })
+    }
+
+    /// Package-Temperatur: Tdie (falls vorhanden), sonst Tctl bzw. „Package id 0“
+    pub fn read(&self) -> Option<f64> {
+        let t = hwmon_temps(&self.hwmon);
+        let pick = |l: &str| t.iter().find(|(n, _)| n == l).map(|x| x.1);
+        pick("Tdie").or_else(|| pick("Tctl")).or_else(|| pick("Package id 0")).or_else(|| t.first().map(|x| x.1)).filter(|v| (-20.0..150.0).contains(v))
+    }
+
+    /// Leistungsaufnahme des Prozessors aus dem RAPL-Energiezähler
+    pub fn power(&mut self) -> Option<f64> {
+        let e = super::sysfs::read_u64(self.rapl.as_ref()?.join("energy_uj"))?;
+        let now = std::time::Instant::now();
+        let prev = self.last_energy.replace((e, now));
+        let (e0, t0) = prev?;
+        let dt = now.duration_since(t0).as_secs_f64();
+        let de = if e >= e0 { e - e0 } else { self.rapl_max - e0 + e };
+        (dt > 0.05).then(|| de as f64 / 1e6 / dt).filter(|w| *w < 2000.0)
+    }
+
+    /// Je Kern: unter Linux nur die Temperatur (Intel „Core N“); Watt/Spannung je Kern liefert der Kernel nicht.
+    pub fn per_core(&mut self, cores: &[Vec<usize>]) -> Vec<CoreReading> {
+        if self.vendor != Vendor::Intel {
+            return Vec::new();
+        }
+        let temps = hwmon_temps(&self.hwmon);
+        cores
+            .iter()
+            .map(|lps| {
+                let core_id = lps.first().and_then(|lp| super::sysfs::read_u64(format!("/sys/devices/system/cpu/cpu{lp}/topology/core_id")));
+                let temp_c = core_id.and_then(|id| temps.iter().find(|(n, _)| *n == format!("Core {id}")).map(|x| x.1));
+                CoreReading { lps: lps.clone(), temp_c, ..Default::default() }
+            })
+            .collect()
+    }
+
+    /// AMD: Tccd1 … Tccd8 (k10temp)
+    /// Linux: Timings liest der Kernel nicht aus – bleibt leer.
+    pub fn ram_timings(&self) -> Vec<super::dimm::Timings> {
+        Vec::new()
+    }
+
+    pub fn ccd_temps(&self) -> Vec<f64> {
+        let mut v: Vec<(u32, f64)> = hwmon_temps(&self.hwmon).into_iter().filter_map(|(n, t)| n.strip_prefix("Tccd").and_then(|i| i.parse().ok()).map(|i| (i, t))).collect();
+        v.sort_by_key(|x| x.0);
+        v.into_iter().map(|x| x.1).collect()
+    }
+}
+
 pub fn intel_tjmax(v: u64) -> f64 {
     let t = ((v >> 16) & 0xFF) as f64;
     if (60.0..=130.0).contains(&t) {
@@ -527,6 +670,7 @@ mod tests {
         assert_eq!(tctl_offset("AMD Ryzen 7 1700X Eight-Core Processor"), 20.0);
     }
 
+    #[cfg(windows)]
     #[test]
     fn module_embedded() {
         assert!(AMD_FAMILY17_MODULE.len() > 1000);

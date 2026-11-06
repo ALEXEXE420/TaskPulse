@@ -134,6 +134,33 @@ pub fn save_file_dialog(title: &str, default_name: &str, start_dir: Option<&std:
     }
 }
 
+/// „Öffnen“-Dialog von Windows. `filters` = (Beschreibung, Muster), z. B. ("Programme", "*.exe").
+pub fn open_file_dialog(title: &str, filters: &[(&str, &str)]) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let d: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let names: Vec<(HSTRING, HSTRING)> = filters.iter().map(|(n, p)| (HSTRING::from(*n), HSTRING::from(*p))).collect();
+        let specs: Vec<COMDLG_FILTERSPEC> = names.iter().map(|(n, p)| COMDLG_FILTERSPEC { pszName: PCWSTR(n.as_ptr()), pszSpec: PCWSTR(p.as_ptr()) }).collect();
+        if !specs.is_empty() {
+            let _ = d.SetFileTypes(&specs);
+        }
+        let _ = d.SetTitle(&HSTRING::from(title));
+        if let Ok(o) = d.GetOptions() {
+            let _ = d.SetOptions(o | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+        }
+        let owner = find_own_window(MAIN_TITLE).unwrap_or_default();
+        d.Show(owner).ok()?;
+        let item = d.GetResult().ok()?;
+        let p = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s.map(std::path::PathBuf::from)
+    }
+}
+
 pub fn shell_open(target: &str) {
     unsafe {
         ShellExecuteW(None, w!("open"), &HSTRING::from(target), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);

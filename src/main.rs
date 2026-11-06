@@ -8,22 +8,41 @@
 //!   TaskPulse-Setup.exe --update [--reopen]   stilles Update der installierten Version
 //!   TaskPulse.exe --taskbar     nur Taskleisten-Anzeige (Autostart)
 //!   TaskPulse.exe --settings    Hauptfenster auf der Einstellungsseite
-//!   TaskPulse.exe --page leistung|gpu|prozesse|einstellungen
+//!   TaskPulse.exe --page leistung|gpu|prozesse|autostart|benchmark|einstellungen
 //!   TaskPulse.exe --dump DATEI  einen Messdurchlauf als JSON schreiben (Tests)
 //!   TaskPulse.exe --taskbar-info DATEI   gefundene Taskleisten beschreiben (Diagnose)
 //!   TaskPulse.exe --render-test BASIS   Anzeige als BASIS_dunkel.bmp / BASIS_hell.bmp speichern (Tests)
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
+// Unter Linux bleiben die reinen Windows-Hilfsfunktionen (Registerformate u. Ä.) ungenutzt
+#![cfg_attr(not(windows), allow(dead_code))]
 
+// Windows-gebundene Module haben unter Linux eigene Dateien mit denselben Schnittstellen (src/linux/)
+#[cfg(windows)]
+mod autostart;
+#[cfg(target_os = "linux")]
+#[path = "linux/autostart.rs"]
 mod autostart;
 mod config;
 mod diag;
 mod format;
+#[cfg(windows)]
+mod installer;
+#[cfg(target_os = "linux")]
+#[path = "linux/installer.rs"]
 mod installer;
 mod sensors;
+#[cfg(windows)]
+mod taskbar;
+#[cfg(target_os = "linux")]
+#[path = "linux/taskbar.rs"]
 mod taskbar;
 mod ui;
 mod updater;
+#[cfg(windows)]
+mod winutil;
+#[cfg(target_os = "linux")]
+#[path = "linux/winutil.rs"]
 mod winutil;
 
 use config::Config;
@@ -78,6 +97,14 @@ fn dump(path: Option<&str>) {
         .iter()
         .map(|g| serde_json::json!({"title": g.title, "detail": g.detail, "lps": g.lps}))
         .collect();
+    let gpu_spec = {
+        let list = sensors::gpu_proc::dxgi_adapters();
+        sensors::gpu::auto_adapter(&list).map(|a| {
+            let nv = sensors::nvgpu::NvGpu::new().filter(|_| a.vendor_id == 0x10DE).map(|n| n.spec());
+            sensors::spec::gpu_spec(a, nv.as_ref(), &sensors::spec::pnp_info(a), None, None)
+        })
+    };
+    let cpu_spec = sensors::spec::cpu_spec(b.cpu.nominal_mhz);
     let v = serde_json::json!({
         "elevated": winutil::is_elevated(),
         "cpu_brand": sensors::cputemp::cpu_info().brand,
@@ -86,6 +113,10 @@ fn dump(path: Option<&str>) {
         "basic": b,
         "taskbar_text": cells,
         "disk": d,
+        "dimms": sensors::dimm::modules(),
+        "startup": sensors::startup::list(),
+        "gpu_spec": gpu_spec,
+        "cpu_spec": cpu_spec,
         "gpu_windows_generic": gw,
         "gpus": sensors::gpu_proc::dxgi_adapters().iter().map(|a| serde_json::json!({"name": a.name, "vendor": a.vendor_name(), "dedicated_gb": a.dedicated / 1073741824.0, "luid": a.luid})).collect::<Vec<_>>(),
         "gpu_total_pct_counters": g.total_pct,
@@ -118,6 +149,15 @@ fn main() {
         diag::log("Test-Fehler ausgelöst (--test-fehler)");
         let v: Vec<u32> = Vec::new();
         let _ = v[std::hint::black_box(3)];
+    }
+    if args.iter().any(|a| a == "--test-absturz") {
+        // Test: absichtlicher harter Absturz (Speicherzugriffsfehler) – muss einen Absturzbericht erzeugen
+        // (Windows: sofort; Linux: kleine Datei sofort, vollständiger Bericht beim nächsten Start)
+        diag::log("Test-Absturz ausgelöst (--test-absturz)");
+        unsafe {
+            let p: *mut u32 = std::hint::black_box(std::ptr::null_mut());
+            std::ptr::write_volatile(p, 1);
+        }
     }
     if args.iter().any(|a| a == "--elevated-launch") {
         // Über die Admin-Aufgabe gestartet: ursprüngliche Argumente übernehmen
@@ -193,6 +233,32 @@ page={}
         diag::log(format!("Test Speichern-Dialog: {r:?}"));
         return;
     }
+    if has("--autostart-selbsttest") {
+        // Hinzufügen → ausschalten → einschalten → entfernen, mit einem Testeintrag (nur aktueller Benutzer)
+        let name = "TaskPulse Selbsttest";
+        let exe = if cfg!(windows) { std::env::var("WINDIR").unwrap_or(r"C:\Windows".into()) + r"\notepad.exe" } else { "/bin/true".into() };
+        let find = || sensors::startup::list().into_iter().find(|e| e.name == name);
+        let mut log = Vec::new();
+        log.push(format!("hinzufügen: {:?}", sensors::startup::add(name, &exe, "--test")));
+        let e = find();
+        log.push(format!("gefunden: {}, an: {:?}", e.is_some(), e.as_ref().map(|e| e.enabled)));
+        if let Some(e) = e {
+            log.push(format!("ausschalten: {:?} → an: {:?}", sensors::startup::set_enabled(&e, false), find().map(|e| e.enabled)));
+            log.push(format!("einschalten: {:?} → an: {:?}", sensors::startup::set_enabled(&e, true), find().map(|e| e.enabled)));
+            log.push(format!("entfernen: {:?} → noch da: {}", sensors::startup::remove(&e), find().is_some()));
+        }
+        log.push(format!("doppelt hinzufügen abgelehnt: {}", {
+            let _ = sensors::startup::add(name, &exe, "");
+            let second = sensors::startup::add(name, &exe, "").is_err();
+            if let Some(e) = find() {
+                let _ = sensors::startup::remove(&e);
+            }
+            second
+        }));
+        log.push(format!("aufgeräumt: {}", find().is_none()));
+        let _ = std::fs::write(value_after("--autostart-selbsttest").unwrap_or("autostart_test.txt"), log.join("\n"));
+        return;
+    }
     if has("--diagnose") {
         // Diagnosebericht ohne Hauptfenster erstellen (z. B. wenn TaskPulse nicht mehr startet)
         if let Some(p) = diag::diagnose("") {
@@ -212,6 +278,7 @@ page={}
         }
         return;
     }
+    #[cfg(windows)]
     if has("--mem-probe") {
         // Speicherbedarf der Bausteine der Taskleisten-Anzeige messen
         let mut out = String::new();
@@ -311,6 +378,7 @@ page={}
             Some("leistung") | Some("gpu") => Some(ui::Tab::Performance),
             Some("prozesse") => Some(ui::Tab::Processes),
             Some("benchmark") => Some(ui::Tab::Benchmark),
+            Some("autostart") => Some(ui::Tab::Startup),
             Some("einstellungen") => Some(ui::Tab::Settings),
             _ => None,
         }

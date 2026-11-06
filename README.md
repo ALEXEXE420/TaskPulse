@@ -8,6 +8,10 @@ Ein Task-Manager für Windows 10/11, geschrieben in Rust. Er zeigt GPU-Werte pro
 
 ### ⬇ [TaskPulse-Setup.exe herunterladen](https://github.com/ALEXEXE420/TaskPulse/releases/latest/download/TaskPulse-Setup.exe)
 
+Windows auf ARM (z. B. NVIDIA RTX Spark N1X, Snapdragon X): [TaskPulse-Setup-ARM64.exe](https://github.com/ALEXEXE420/TaskPulse/releases/latest/download/TaskPulse-Setup-ARM64.exe) (ab Version 0.1.8)
+
+Linux (x86_64, die meisten Distributionen): [TaskPulse-x86_64.AppImage](https://github.com/ALEXEXE420/TaskPulse/releases/latest/download/TaskPulse-x86_64.AppImage) (ab Version 0.1.8) – herunterladen, ausführbar machen (`chmod +x TaskPulse-x86_64.AppImage`) und starten.
+
 Windows 10 (2004 oder neuer) und Windows 11. Was sich in welcher Version geändert hat, steht im [Änderungsprotokoll](CHANGELOG.md) und bei jedem [Release](https://github.com/ALEXEXE420/TaskPulse/releases).
 
 ## Funktionen

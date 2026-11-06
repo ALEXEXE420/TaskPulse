@@ -1,8 +1,10 @@
 //! GPU-Werte pro Prozess über die herstellerunabhängigen Windows-Leistungsindikatoren
 //! "GPU Engine" und "GPU Process Memory" (wie der Task-Manager), plus Adapterliste über DXGI.
 
+#[cfg(windows)]
 use super::pdh::{Counter, Query};
 use std::collections::HashMap;
+#[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIDevice, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -174,6 +176,7 @@ pub fn nvidia_driver(win: &str) -> Option<String> {
     (digits.len() == 5).then(|| format!("{}.{}", &digits[..3], &digits[3..]))
 }
 
+#[cfg(windows)]
 pub fn dxgi_adapters() -> Vec<DxgiAdapter> {
     let mut out: Vec<DxgiAdapter> = Vec::new();
     unsafe {
@@ -236,6 +239,7 @@ pub struct GpuProcSample {
     pub adapter_shared_used: Option<f64>,
 }
 
+#[cfg(windows)]
 struct Counters {
     q: Query,
     engine: Option<Counter>,
@@ -245,6 +249,7 @@ struct Counters {
     ad_shared: Option<Counter>,
 }
 
+#[cfg(windows)]
 impl Counters {
     fn build() -> Option<Counters> {
         let q = Query::new()?;
@@ -258,6 +263,7 @@ impl Counters {
     }
 }
 
+#[cfg(windows)]
 pub struct GpuProc {
     c: Counters,
     pending: Option<Counters>,
@@ -265,6 +271,7 @@ pub struct GpuProc {
     since_rebuild: u32,
 }
 
+#[cfg(windows)]
 impl GpuProc {
     pub fn new() -> Option<GpuProc> {
         Some(GpuProc { c: Counters::build()?, pending: None, adapters: dxgi_adapters(), since_rebuild: 0 })
@@ -352,6 +359,226 @@ impl GpuProc {
 }
 
 /// Ein Prozess kann nicht mehr dedizierten Speicher belegen, als die Karte hat (+5 % Toleranz).
+// ------------------------------------------------------------------ Linux: /sys/class/drm, NVML, fdinfo
+
+#[cfg_attr(windows, allow(dead_code))]
+/// fdinfo-Einträge eines DRM-Clients (Kernel-Doku „drm-usage-stats“):
+/// → (Client-ID, Engine → Nanosekunden, VRAM in Bytes)
+pub fn parse_fdinfo(text: &str) -> Option<(u64, Vec<(String, u64)>, f64)> {
+    let mut id = None;
+    let mut engines = Vec::new();
+    let mut vram = 0.0f64;
+    let mut is_drm = false;
+    for l in text.lines() {
+        let Some((k, v)) = l.split_once(':') else { continue };
+        let v = v.trim();
+        if k == "drm-driver" {
+            is_drm = true;
+        } else if k == "drm-client-id" {
+            id = v.parse().ok();
+        } else if let Some(e) = k.strip_prefix("drm-engine-") {
+            if !e.starts_with("capacity") {
+                if let Some(ns) = v.split_whitespace().next().and_then(|n| n.parse().ok()) {
+                    engines.push((e.to_string(), ns));
+                }
+            }
+        } else if k == "drm-memory-vram" || k == "drm-resident-vram0" || k == "drm-total-vram" {
+            let mut it = v.split_whitespace();
+            let n: f64 = it.next().and_then(|n| n.parse().ok()).unwrap_or(0.0);
+            let unit = it.next().unwrap_or("");
+            vram = vram.max(match unit {
+                "KiB" => n * 1024.0,
+                "MiB" => n * 1048576.0,
+                _ => n,
+            });
+        }
+    }
+    (is_drm).then_some((id?, engines, vram))
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+/// Linux-Engine-Namen in die Namen des Windows-Task-Managers übersetzen
+pub fn linux_engine_name(e: &str) -> String {
+    match e {
+        "gfx" | "render" | "rcs" => "3D".into(),
+        "compute" | "ccs" => "Compute".into(),
+        "dec" | "video" | "vcs" => "Video Decode".into(),
+        "enc" | "enc_1" | "video-enhance" | "vecs" => "Video Encode".into(),
+        "copy" | "dma" | "sdma" | "bcs" => "Copy".into(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn dxgi_adapters() -> Vec<DxgiAdapter> {
+    use super::sysfs::{read, read_u64};
+    let hex = |p: std::path::PathBuf| read(p).and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
+    let nvml = nvml_wrapper::Nvml::init().ok();
+    let mut out = Vec::new();
+    let mut nv_index = 0u32;
+    for card in super::sysfs::dirs("/sys/class/drm") {
+        let name = card.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if !name.starts_with("card") || name.contains('-') {
+            continue; // card0-DP-1 usw. sind Anschlüsse
+        }
+        let dev = card.join("device");
+        let vendor_id = hex(dev.join("vendor"));
+        if vendor_id == 0 {
+            continue;
+        }
+        let driver = std::fs::read_link(dev.join("driver")).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default();
+        let mut a = DxgiAdapter {
+            index: out.len(),
+            luid: name.clone(),
+            vendor_id,
+            device_id: hex(dev.join("device")),
+            subsys_id: hex(dev.join("subsystem_vendor")) | (hex(dev.join("subsystem_device")) << 16),
+            revision: hex(dev.join("revision")),
+            driver: read(format!("/sys/module/{driver}/version")).map(|v| format!("{driver} {v}")).or_else(|| (!driver.is_empty()).then(|| driver.clone())),
+            dedicated: read_u64(dev.join("mem_info_vram_total")).map(|v| v as f64).unwrap_or(0.0),
+            ..Default::default()
+        };
+        if vendor_id == 0x10DE {
+            if let Some(d) = nvml.as_ref().and_then(|n| n.device_by_index(nv_index).ok()) {
+                a.name = d.name().unwrap_or_default();
+                a.dedicated = d.memory_info().map(|m| m.total as f64).unwrap_or(a.dedicated);
+            }
+            nv_index += 1;
+        }
+        if a.name.is_empty() {
+            // Name aus dem Treiber, sonst Hersteller + Geräte-ID
+            a.name = read(dev.join("product_name")).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("{} Grafik ({:04X}:{:04X})", a.vendor_name(), a.vendor_id, a.device_id));
+        }
+        out.push(a);
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+pub struct GpuProc {
+    pub adapters: Vec<DxgiAdapter>,
+    nvml: Option<nvml_wrapper::Nvml>,
+    last_ts: u64,
+    /// fdinfo: (PID, Client-ID) → (Engine → ns, Zeitpunkt)
+    prev: HashMap<(u32, u64), (HashMap<String, u64>, std::time::Instant)>,
+    tick: u32,
+    cached: GpuProcSample,
+}
+
+#[cfg(target_os = "linux")]
+impl GpuProc {
+    pub fn new() -> Option<GpuProc> {
+        let adapters = dxgi_adapters();
+        let nvml = adapters.iter().any(|a| a.vendor_id == 0x10DE).then(|| nvml_wrapper::Nvml::init().ok()).flatten();
+        Some(GpuProc { adapters, nvml, last_ts: 0, prev: HashMap::new(), tick: 0, cached: GpuProcSample::default() })
+    }
+
+    pub fn sample(&mut self) -> GpuProcSample {
+        let main = crate::sensors::gpu::auto_adapter(&self.adapters).cloned();
+        let Some(a) = main else { return GpuProcSample::default() };
+        if a.vendor_id == 0x10DE {
+            if let Some(n) = &self.nvml {
+                return self.sample_nvml(n, &a);
+            }
+        }
+        // fdinfo ist teuer (alle Prozesse) – nur jede zweite Messung neu, dazwischen das letzte Ergebnis
+        self.tick = self.tick.wrapping_add(1);
+        if self.tick % 2 == 0 {
+            return self.cached.clone();
+        }
+        let s = self.sample_fdinfo(&a);
+        self.cached = s.clone();
+        s
+    }
+
+    fn sample_nvml(&self, nvml: &nvml_wrapper::Nvml, a: &DxgiAdapter) -> GpuProcSample {
+        use nvml_wrapper::enums::device::UsedGpuMemory;
+        let mut out = GpuProcSample::default();
+        let Ok(d) = nvml.device_by_index(0) else { return out };
+        let gpu = d.utilization_rates().ok().map(|u| u.gpu as f64);
+        out.total_pct = gpu;
+        let enc = d.encoder_utilization().ok().map(|u| u.utilization as f64);
+        let dec = d.decoder_utilization().ok().map(|u| u.utilization as f64);
+        out.by_engtype = vec![("3D".into(), gpu.unwrap_or(0.0)), ("Video Encode".into(), enc.unwrap_or(0.0)), ("Video Decode".into(), dec.unwrap_or(0.0))];
+        out.adapter_dedicated_used = d.memory_info().ok().map(|m| m.used as f64);
+        let mut procs: Vec<_> = d.running_graphics_processes().unwrap_or_default();
+        procs.extend(d.running_compute_processes().unwrap_or_default());
+        for p in procs {
+            let e = out.per_pid.entry(p.pid).or_default();
+            if let UsedGpuMemory::Used(b) = p.used_gpu_memory {
+                e.dedicated = e.dedicated.max(b as f64);
+            }
+        }
+        // Auslastung je Prozess (Stichproben seit 2 s)
+        let since = now_us().saturating_sub(2_000_000);
+        for u in d.process_utilization_stats(since).unwrap_or_default() {
+            let e = out.per_pid.entry(u.pid).or_default();
+            let (pct, label) = [(u.sm_util, "3D"), (u.enc_util, "Video Encode"), (u.dec_util, "Video Decode")].into_iter().max_by_key(|x| x.0).unwrap();
+            if pct as f64 >= e.max_pct {
+                e.max_pct = pct as f64;
+                e.engine_label = if pct > 0 { format!("GPU {} – {label}", a.index) } else { String::new() };
+            }
+        }
+        out
+    }
+
+    fn sample_fdinfo(&mut self, a: &DxgiAdapter) -> GpuProcSample {
+        let mut out = GpuProcSample::default();
+        let now = std::time::Instant::now();
+        let mut seen = std::collections::HashSet::new();
+        let mut by_eng: HashMap<String, f64> = HashMap::new();
+        if let Ok(rd) = std::fs::read_dir("/proc") {
+            for e in rd.flatten() {
+                let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+                let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
+                for fd in fds.flatten() {
+                    let target = std::fs::read_link(fd.path()).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                    if !target.starts_with("/dev/dri/") {
+                        continue;
+                    }
+                    let Some(name) = fd.file_name().to_str().map(String::from) else { continue };
+                    let Ok(info) = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{name}")) else { continue };
+                    let Some((client, engines, vram)) = parse_fdinfo(&info) else { continue };
+                    if !seen.insert((pid, client)) {
+                        continue; // derselbe Client über mehrere Dateideskriptoren
+                    }
+                    let cur: HashMap<String, u64> = engines.into_iter().collect();
+                    let p = out.per_pid.entry(pid).or_default();
+                    p.dedicated += vram;
+                    if let Some((old, t0)) = self.prev.get(&(pid, client)) {
+                        let dt_ns = now.duration_since(*t0).as_nanos() as f64;
+                        for (eng, ns) in &cur {
+                            let d = ns.saturating_sub(*old.get(eng).unwrap_or(ns)) as f64;
+                            let pct = (d / dt_ns * 100.0).clamp(0.0, 100.0);
+                            let label = linux_engine_name(eng);
+                            *by_eng.entry(label.clone()).or_insert(0.0) += pct;
+                            if pct > p.max_pct {
+                                p.max_pct = pct;
+                                p.engine_label = if pct >= 0.5 { format!("GPU {} – {label}", a.index) } else { String::new() };
+                            }
+                        }
+                    }
+                    self.prev.insert((pid, client), (cur, now));
+                }
+            }
+        }
+        self.prev.retain(|k, _| seen.contains(k));
+        let dev = std::path::PathBuf::from(format!("/sys/class/drm/{}/device", a.luid));
+        out.total_pct = super::sysfs::read_f64(dev.join("gpu_busy_percent")).or_else(|| by_eng.values().copied().reduce(f64::max).map(|v| v.min(100.0)));
+        out.adapter_dedicated_used = super::sysfs::read_f64(dev.join("mem_info_vram_used"));
+        out.adapter_shared_used = super::sysfs::read_f64(dev.join("mem_info_gtt_used"));
+        let mut v: Vec<(String, f64)> = by_eng.into_iter().map(|(k, x)| (k, x.min(100.0))).collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        out.by_engtype = v;
+        out
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn now_us() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros() as u64).unwrap_or(0)
+}
+
 pub fn plausible(v: f64, adapter_total: Option<f64>) -> bool {
     match adapter_total {
         Some(t) => v.is_finite() && v <= t * 1.05,
@@ -373,6 +600,18 @@ pub fn group_gpu_pct<'a>(members: impl Iterator<Item = &'a ProcGpu>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_fdinfo() {
+        let t = "pos:\t0\nflags:\t02100002\ndrm-driver:\tamdgpu\ndrm-client-id:\t42\ndrm-memory-vram:\t2048 KiB\ndrm-engine-gfx:\t1500000 ns\ndrm-engine-dec:\t0 ns\ndrm-engine-capacity-gfx:\t1\n";
+        let (id, eng, vram) = parse_fdinfo(t).unwrap();
+        assert_eq!(id, 42);
+        assert_eq!(eng, vec![("gfx".to_string(), 1500000), ("dec".to_string(), 0)]);
+        assert_eq!(vram, 2048.0 * 1024.0);
+        assert!(parse_fdinfo("pos: 0\nflags: 1\n").is_none());
+        assert_eq!(linux_engine_name("gfx"), "3D");
+        assert_eq!(linux_engine_name("enc"), "Video Encode");
+    }
 
     #[test]
     fn engine_instance() {

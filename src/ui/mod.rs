@@ -4,6 +4,7 @@ mod benchmark;
 mod performance;
 mod processes;
 mod settings;
+mod startup;
 mod update;
 
 pub use settings::taskbar_running;
@@ -34,6 +35,15 @@ pub struct Frame {
     pub core_readings: Vec<crate::sensors::cputemp::CoreReading>,
     /// AMD: Temperatur je CCD (Hardware-Reihenfolge)
     pub ccd_temps: Vec<f64>,
+    /// Laufende RAM-Timings je Kanal (AMD mit PawnIO)
+    pub ram_timings: Vec<crate::sensors::dimm::Timings>,
+    /// Temperatur der Speicherriegel (SMBus)
+    pub dimm_temps: Vec<crate::sensors::dimm::DimmTemp>,
+    /// Spezifikation zum Aufklappen (Grafikkarte alle 5 s, CPU einmal)
+    pub gpu_spec: Arc<crate::sensors::spec::Spec>,
+    pub cpu_spec: Arc<crate::sensors::spec::Spec>,
+    /// PCIe-Verbindung der angezeigten Grafikkarte
+    pub gpu_link: Option<crate::sensors::spec::PcieLink>,
     pub vram_used: Option<f64>,
     pub took_ms: f64,
 }
@@ -62,6 +72,7 @@ fn start_collector(ctx: egui::Context, cfg: Config) -> Collector {
                 let mut procs = Procs::new();
                 let phys_cores: Vec<Vec<usize>> = crate::sensors::topology::query().cores.into_iter().map(|c| c.lps).collect();
                 // Messen auch dann im Takt, wenn andere Programme die CPU voll auslasten (Benchmark mit CPU-Burner)
+                #[cfg(windows)]
                 unsafe {
                     let _ = windows::Win32::System::Threading::SetThreadPriority(
                         windows::Win32::System::Threading::GetCurrentThread(),
@@ -69,6 +80,11 @@ fn start_collector(ctx: egui::Context, cfg: Config) -> Collector {
                     );
                 }
                 let mut seq = 0u64;
+                let mut dimm_temps: Vec<crate::sensors::dimm::DimmTemp> = Vec::new();
+                let nv_spec_src = crate::sensors::nvgpu::NvGpu::new();
+                let mut gpu_spec: Arc<crate::sensors::spec::Spec> = Arc::default();
+                let mut cpu_spec: Option<Arc<crate::sensors::spec::Spec>> = None;
+                let mut gpu_link: Option<crate::sensors::spec::PcieLink> = None;
                 let mut next: Option<Instant> = None;
                 loop {
                     let iv = interval_ms.load(Ordering::Relaxed);
@@ -81,6 +97,11 @@ fn start_collector(ctx: egui::Context, cfg: Config) -> Collector {
                     let b = basic.sample(&c);
                     let core_readings = basic.per_core(&phys_cores);
                     let ccd_temps = basic.ccd_temps();
+                    let ram_timings = basic.ram_timings();
+                    // Riegeltemperatur ändert sich langsam → alle 2 s lesen
+                    if seq % 2 == 0 || dimm_temps.is_empty() {
+                        dimm_temps = basic.dimm_temps(&c);
+                    }
                     // Nur für Bildschirmfotos ohne Adminrechte: TASKPULSE_DEMO_KERNE=1 setzt Beispielwerte ein
                     let (core_readings, ccd_temps) = if core_readings.is_empty() && std::env::var_os("TASKPULSE_DEMO_KERNE").is_some() {
                         let demo = phys_cores
@@ -98,16 +119,36 @@ fn start_collector(ctx: egui::Context, cfg: Config) -> Collector {
                     } else {
                         (core_readings, ccd_temps)
                     };
+                    // (Beispielwerte auch für RAM-Timings und -Temperaturen)
+                    let ram_timings = if ram_timings.is_empty() && std::env::var_os("TASKPULSE_DEMO_KERNE").is_some() {
+                        crate::sensors::dimm::decode_umc(0, true, 48 | (1 << 11), [16 | (36 << 8) | (18 << 16) | (18 << 24), 54 | (18 << 16), 4 | (6 << 8) | (12 << 24), 16, 16 | (4 << 8) | (12 << 16), 24], [560, 0, 0, 0]).into_iter().collect()
+                    } else {
+                        ram_timings
+                    };
+                    if dimm_temps.is_empty() && std::env::var_os("TASKPULSE_DEMO_KERNE").is_some() {
+                        dimm_temps = (0..crate::sensors::dimm::modules().len() as u8).map(|i| crate::sensors::dimm::DimmTemp { index: i, temp_c: 38.5 + i as f64 * 1.25 }).collect();
+                    }
                     let d = disk.as_mut().map(|d| d.sample()).unwrap_or_default();
                     let g = gpu.as_mut().map(|g| g.sample()).unwrap_or_default();
                     let p = procs.sample();
                     let adapters = gpu.as_ref().map(|g| g.adapters.clone()).unwrap_or_default();
                     let vram_total = b.gpu.mem_total.or_else(|| adapters.iter().map(|a| a.dedicated).reduce(f64::max));
                     let vram_used = b.gpu.mem_used.or(g.adapter_dedicated_used);
+                    // Spezifikation: Grafikkarte alle 5 s (PCIe-Verbindung ändert sich beim Stromsparen), CPU einmal
+                    if seq % 5 == 0 {
+                        let sel = adapters.iter().find(|a| a.luid == c.gpu_adapter).or_else(|| crate::sensors::gpu::auto_adapter(&adapters));
+                        if let Some(a) = sel {
+                            let nv = nv_spec_src.as_ref().filter(|_| a.vendor_id == 0x10DE).map(|n| n.spec());
+                            let pnp = crate::sensors::spec::pnp_info(a);
+                            gpu_link = crate::sensors::spec::effective_link(&pnp, nv.as_ref());
+                            gpu_spec = Arc::new(crate::sensors::spec::gpu_spec(a, nv.as_ref(), &pnp, None, b.gpu.clock_mhz));
+                        }
+                    }
+                    let cpu_spec = cpu_spec.get_or_insert_with(|| Arc::new(crate::sensors::spec::cpu_spec(b.cpu.nominal_mhz))).clone();
                     seq += 1;
                     let took_ms = t0.elapsed().as_secs_f64() * 1000.0;
                     *frame.lock().unwrap() =
-                        Some(Frame { seq, basic: b, disk: d, gpu: g, procs: p, adapters, vram_total, vram_used, took_ms, core_readings, ccd_temps });
+                        Some(Frame { seq, basic: b, disk: d, gpu: g, procs: p, adapters, vram_total, vram_used, took_ms, core_readings, ccd_temps, ram_timings, dimm_temps: dimm_temps.clone(), gpu_spec: gpu_spec.clone(), cpu_spec, gpu_link });
                     ctx.request_repaint();
                     // Nächster Messzeitpunkt fest im Takt (sonst summieren sich Verzögerungen,
                     // und im Benchmark fehlt alle ~15 s eine Sekunde)
@@ -212,6 +253,7 @@ impl History {
 pub enum Tab {
     Processes,
     Performance,
+    Startup,
     Benchmark,
     Settings,
 }
@@ -262,6 +304,7 @@ pub struct TaskPulseApp {
     pub settings: settings::SettingsState,
     pub update: update::UpdateUi,
     pub bench: benchmark::BenchState,
+    pub startup: startup::StartupState,
     /// Absturzbericht aus dem Windows-Protokoll (beim Start im Hintergrund geprüft)
     pub crash_notice: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// Ergebnis „Diagnosebericht erstellen“
@@ -296,12 +339,16 @@ impl TaskPulseApp {
             settings: settings::SettingsState::default(),
             update: update::UpdateUi::default(),
             bench: benchmark::BenchState::from_args(),
+            startup: startup::StartupState::default(),
             crash_notice: {
                 let n = Arc::new(Mutex::new(None));
                 let n2 = n.clone();
                 let ctx = cc.egui_ctx.clone();
                 std::thread::spawn(move || {
-                    if let Some(p) = crate::diag::check_new_crashes() {
+                    // Abstürze aus dem System-Protokoll, danach alle noch nicht angezeigten Berichte
+                    let crash = crate::diag::check_new_crashes();
+                    let unseen = crate::diag::unseen_reports();
+                    if let Some(p) = crash.or(unseen) {
                         *n2.lock().unwrap() = Some(p);
                         ctx.request_repaint();
                     }
@@ -348,6 +395,10 @@ impl TaskPulseApp {
                 ui.add_space(12.0);
                 ui.selectable_value(&mut self.tab, Tab::Processes, "Prozesse");
                 ui.selectable_value(&mut self.tab, Tab::Performance, "Leistung");
+                // Beim Öffnen des Reiters neu einlesen (könnte sich außerhalb geändert haben)
+                if ui.selectable_value(&mut self.tab, Tab::Startup, "Autostart").clicked() {
+                    self.startup.mark_stale();
+                }
                 let bench_label = if self.bench.recording { "Benchmark ●" } else { "Benchmark" };
                 ui.selectable_value(&mut self.tab, Tab::Benchmark, bench_label);
                 ui.selectable_value(&mut self.tab, Tab::Settings, "Einstellungen");
@@ -364,7 +415,8 @@ impl TaskPulseApp {
                     if !narrow {
                         ui.label("Aktualisierung:");
                     }
-                    if !self.admin {
+                    // Unter Linux braucht TaskPulse keine Adminrechte – dort kein Hinweis
+                    if !self.admin && cfg!(windows) {
                         if ui
                             .button(if narrow { "🛡 Als Admin" } else { "🛡 Mit Adminrechten neu starten" })
                             .on_hover_text("Ohne Adminrechte fehlen CPU-Temperatur, einige Prozessdaten und Aktionen.")
@@ -387,17 +439,46 @@ impl TaskPulseApp {
 
     /// Hinweis, wenn TaskPulse zuletzt abgestürzt ist.
     fn crash_banner(&mut self, ctx: &egui::Context) {
+        // Bericht aus diesem Lauf (z. B. Fehler in einem Hintergrund-Thread) sofort melden
+        if let Some(p) = crate::diag::take_new_report() {
+            *self.crash_notice.lock().unwrap() = Some(p);
+        }
         let Some(p) = self.crash_notice.lock().unwrap().clone() else { return };
+        let file = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+        let what = if file.starts_with("Absturz") { "TaskPulse ist zuletzt abgestürzt" } else { "In TaskPulse ist ein Fehler aufgetreten" };
         egui::TopBottomPanel::top("crash_banner").show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 120, 40),
+                egui::RichText::new(format!("⚠ {what} – ein Fehlerbericht wurde automatisch erstellt.")).strong(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Datei:");
+                ui.label(egui::RichText::new(p.to_string_lossy()).monospace());
+            });
+            ui.label(
+                egui::RichText::new("Hilf mit, den Fehler zu beheben: „Auf GitHub melden“ öffnet eine vorausgefüllte Meldung – zieh die Datei dort einfach hinein. Der Bericht enthält keine Passwörter oder persönlichen Dateien.")
+                    .small()
+                    .weak(),
+            );
             ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::from_rgb(220, 120, 40), egui::RichText::new("⚠ TaskPulse ist zuletzt abgestürzt – ein Fehlerbericht wurde erstellt.").strong());
-                if ui.button("Bericht zeigen").clicked() {
+                if let Some(url) = crate::diag::github_issue_url(&p) {
+                    if ui.button("Auf GitHub melden").on_hover_text("Öffnet GitHub im Browser – gesendet wird erst, wenn du dort auf „Create“ klickst").clicked() {
+                        winutil::shell_open(&url);
+                        winutil::open_in_explorer(&p.to_string_lossy());
+                    }
+                }
+                if ui.button("Ordner öffnen").clicked() {
                     winutil::open_in_explorer(&p.to_string_lossy());
                 }
-                if ui.small_button("OK").clicked() {
+                if ui.button("Pfad kopieren").clicked() {
+                    ui.ctx().copy_text(p.to_string_lossy().to_string());
+                }
+                if ui.button("Schließen").clicked() {
                     *self.crash_notice.lock().unwrap() = None;
                 }
             });
+            ui.add_space(4.0);
         });
     }
 
@@ -440,6 +521,16 @@ impl eframe::App for TaskPulseApp {
         }
         if self.last_signal_check.elapsed() > Duration::from_millis(500) {
             self.last_signal_check = Instant::now();
+            // Linux: zweiter Start → dieses Fenster nach vorn holen
+            #[cfg(target_os = "linux")]
+            {
+                let front = Config::dir().join("nach_vorn.signal");
+                if front.exists() {
+                    let _ = std::fs::remove_file(front);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+            }
             let sig = Config::dir().join("open_settings.signal");
             if sig.exists() {
                 let _ = std::fs::remove_file(sig);
@@ -454,6 +545,7 @@ impl eframe::App for TaskPulseApp {
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Processes => processes::show(self, ui),
             Tab::Performance => performance::show(self, ui),
+            Tab::Startup => startup::show(self, ui),
             Tab::Benchmark => benchmark::show(self, ui),
             Tab::Settings => settings::show(self, ui),
         });
@@ -474,10 +566,36 @@ impl eframe::App for TaskPulseApp {
 
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
     let mut names = Vec::new();
-    for (name, file) in [("segoe", "segoeui.ttf"), ("segoe_sym", "seguisym.ttf")] {
-        if let Ok(bytes) = std::fs::read(format!(r"{windir}\Fonts\{file}")) {
+    #[cfg(windows)]
+    let candidates: Vec<(&str, Vec<String>)> = {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+        vec![("segoe", vec![format!(r"{windir}\Fonts\segoeui.ttf")]), ("segoe_sym", vec![format!(r"{windir}\Fonts\seguisym.ttf")])]
+    };
+    // Linux: verbreitete Schriften (Noto/DejaVu) – sonst bleibt egui bei seiner eingebauten Schrift
+    #[cfg(not(windows))]
+    let candidates: Vec<(&str, Vec<String>)> = vec![
+        (
+            "sans",
+            [
+                "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        ),
+        (
+            "symbols",
+            ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf"].iter().map(|s| s.to_string()).collect(),
+        ),
+    ];
+    for (name, files) in candidates {
+        if let Some(bytes) = files.iter().find_map(|f| std::fs::read(f).ok()) {
             fonts.font_data.insert(name.into(), egui::FontData::from_owned(bytes));
             names.push(name);
         }
@@ -515,6 +633,8 @@ pub fn app_icon() -> egui::IconData {
 
 /// Startet das Hauptfenster (blockiert bis zum Schließen).
 pub fn run(page: Option<Tab>) -> eframe::Result<()> {
+    #[cfg(target_os = "linux")]
+    winutil::register_main_window();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(winutil::MAIN_TITLE)

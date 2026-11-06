@@ -62,6 +62,13 @@ fn threshold(ui: &mut egui::Ui, label: &str, t: &mut Threshold, unit: &str, max:
     ui.end_row();
 }
 
+/// Linux: schwebende Anzeige statt Taskleisten-Anzeige
+#[cfg(target_os = "linux")]
+pub fn taskbar_running() -> bool {
+    crate::taskbar::running()
+}
+
+#[cfg(windows)]
 pub fn taskbar_running() -> bool {
     use windows::core::w;
     use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
@@ -133,6 +140,8 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
     }
     let basic = app.frame.basic.clone();
     let admin_now = app.admin;
+    #[cfg(not(windows))]
+    let _ = admin_now;
     let cfg = &mut app.cfg;
     let app_update = &mut app.update;
     let diag_message = &mut app.diag_message;
@@ -142,10 +151,10 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.set_max_width(820.0);
 
-        section(ui, "Taskleisten-Anzeige", |ui| {
+        section(ui, if cfg!(windows) { "Taskleisten-Anzeige" } else { "Anzeige (schwebendes Fenster)" }, |ui| {
             let running = taskbar_running();
             ui.horizontal(|ui| {
-                if ui.checkbox(&mut cfg.taskbar.enabled, "Anzeige in der Taskleiste").changed() && cfg.taskbar.enabled && !running {
+                if ui.checkbox(&mut cfg.taskbar.enabled, if cfg!(windows) { "Anzeige in der Taskleiste" } else { "Kleines Anzeigefenster, immer im Vordergrund" }).changed() && cfg.taskbar.enabled && !running {
                     // Datei zuerst schreiben, damit die neue Anzeige den aktuellen Stand liest
                     let _ = cfg.save();
                     winutil::spawn_self(&["--taskbar"]);
@@ -156,7 +165,11 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                     winutil::spawn_self(&["--taskbar"]);
                 }
             });
+            if !cfg!(windows) {
+                ui.label(RichText::new("Unter Linux gibt es keine einheitliche Taskleiste zum Einbetten – die Anzeige ist ein eigenes kleines Fenster. Ziehen = verschieben, Doppelklick = Hauptfenster, Rechtsklick = Menü.").small().weak());
+            }
             egui::Grid::new("tb_grid").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                if cfg!(windows) {
                 ui.label("Position");
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut cfg.taskbar.side, Side::Left, "Links");
@@ -180,6 +193,7 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                         }
                     });
                 ui.end_row();
+                }
                 ui.label("Aktualisierung");
                 let mut secs = cfg.taskbar.interval_ms as f32 / 1000.0;
                 if ui.add(egui::Slider::new(&mut secs, 0.25..=5.0).step_by(0.25).suffix(" s")).changed() {
@@ -243,7 +257,7 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
             }
             if ui.button("Standardreihenfolge").clicked() {
                 cfg.taskbar.fields = Field::ALL.to_vec();
-                cfg.taskbar.hidden.clear();
+                cfg.taskbar.hidden = Field::OPTIONAL.to_vec();
             }
         });
 
@@ -319,7 +333,12 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                 ui.radio_value(&mut cfg.cpu_freq_mode, CpuFreqMode::MaxCore, "höchster Kerntakt");
                 ui.radio_value(&mut cfg.cpu_freq_mode, CpuFreqMode::Average, "Durchschnitt aller Kerne");
             });
-            ui.checkbox(&mut cfg.use_pawnio, "CPU-Temperatur über PawnIO-Treiber lesen (abschaltbar, falls Antivirus oder Anti-Cheat stört)");
+            if cfg!(windows) {
+                ui.checkbox(&mut cfg.use_pawnio, "CPU-Temperatur über PawnIO-Treiber lesen (abschaltbar, falls Antivirus oder Anti-Cheat stört)");
+                ui.add_enabled(cfg.use_pawnio, egui::Checkbox::new(&mut cfg.ram_sensors, "RAM-Temperatur über den SMBus lesen (Sensoren auf den Riegeln, nur lesend)"));
+            } else {
+                ui.checkbox(&mut cfg.use_pawnio, "CPU-Temperatur und -Watt lesen (Linux-Sensoren hwmon und RAPL; Watt nur mit root)");
+            }
             ui.label(RichText::new(format!("Status: {}", basic.cpu_temp_status)).weak());
         });
 
@@ -346,6 +365,7 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
             });
         });
 
+        #[cfg(windows)]
         section(ui, "Adminrechte", |ui| {
             let busy = st.admin_job.is_some();
             let mut want = st.admin_actual.unwrap_or(false);
@@ -432,7 +452,7 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
             let busy = st.autostart_job.is_some();
             let mut want = st.autostart_actual.unwrap_or(false);
             ui.horizontal(|ui| {
-                if ui.add_enabled(!busy, egui::Checkbox::new(&mut want, "Mit Windows starten (nur Taskleisten-Anzeige)")).changed() {
+                if ui.add_enabled(!busy, egui::Checkbox::new(&mut want, if cfg!(windows) { "Mit Windows starten (nur Taskleisten-Anzeige)" } else { "Beim Anmelden starten (nur die Anzeige)" })).changed() {
                     let job = Arc::new(Mutex::new(None));
                     let j = job.clone();
                     std::thread::spawn(move || {
@@ -496,6 +516,21 @@ pub fn run_dialog(app: &mut TaskPulseApp, ctx: &egui::Context) {
         let c = cmd.trim().to_string();
         if !c.is_empty() {
             let (file, args) = split_command(&c);
+            // Linux: über die Shell starten, mit Adminrechten über pkexec
+            #[cfg(target_os = "linux")]
+            {
+                let r = if app.settings.run_admin {
+                    std::process::Command::new("pkexec").arg("sh").arg("-c").arg(&c).spawn()
+                } else {
+                    std::process::Command::new("sh").arg("-c").arg(&c).spawn()
+                };
+                let _ = (file, args);
+                if r.is_err() {
+                    app.status = Some((format!("„{c}“ konnte nicht gestartet werden"), Instant::now()));
+                }
+            }
+            #[cfg(windows)]
+            {
             use windows::core::{w, HSTRING, PCWSTR};
             use windows::Win32::UI::Shell::ShellExecuteW;
             use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -503,6 +538,7 @@ pub fn run_dialog(app: &mut TaskPulseApp, ctx: &egui::Context) {
             let r = unsafe { ShellExecuteW(None, verb, &HSTRING::from(file), &HSTRING::from(args), PCWSTR::null(), SW_SHOWNORMAL) };
             if (r.0 as isize) <= 32 {
                 app.status = Some((format!("„{c}“ konnte nicht gestartet werden"), Instant::now()));
+            }
             }
         }
         close = true;

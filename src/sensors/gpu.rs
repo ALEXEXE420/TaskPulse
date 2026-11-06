@@ -6,18 +6,28 @@
 //!   mit WDDM-2.7-Treibern), Auslastung und belegter VRAM über die Leistungsindikatoren
 //!   "GPU Engine" und "GPU Adapter Memory", Gesamt-VRAM über DXGI. Watt gibt es dort nicht.
 
-use super::gpu_proc::{dxgi_adapters, parse_engine_instance, parse_memory_luid, DxgiAdapter, EngineKey};
+#[cfg(windows)]
+use super::gpu_proc::{dxgi_adapters, parse_engine_instance, parse_memory_luid, EngineKey};
+use super::gpu_proc::DxgiAdapter;
 use super::nvgpu::{GpuSample, NvGpu};
+#[cfg(windows)]
 use super::pdh::{Counter, Query};
+#[cfg(windows)]
 use std::collections::HashMap;
+#[cfg(windows)]
 use std::ffi::c_void;
+#[cfg(windows)]
 use windows::core::{s, w};
+#[cfg(windows)]
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 const NVIDIA: u32 = 0x10DE;
+#[cfg(windows)]
 const KMTQAITYPE_ADAPTERPERFDATA: u32 = 62;
+#[cfg(windows)]
 const KMTQAITYPE_NODEPERFDATA: u32 = 63;
 
+#[cfg(windows)]
 #[repr(C)]
 struct OpenAdapterFromLuid {
     luid_low: u32,
@@ -25,6 +35,7 @@ struct OpenAdapterFromLuid {
     h_adapter: u32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 struct QueryAdapterInfo {
     h_adapter: u32,
@@ -33,11 +44,13 @@ struct QueryAdapterInfo {
     size: u32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 struct CloseAdapter {
     h_adapter: u32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[derive(Default)]
 struct AdapterPerfData {
@@ -54,6 +67,7 @@ struct AdapterPerfData {
     power_state_override: u8,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 #[derive(Default)]
 struct NodePerfData {
@@ -69,10 +83,14 @@ struct NodePerfData {
     max_transition_latency: u64,
 }
 
+#[cfg(windows)]
 type FnOpen = unsafe extern "system" fn(*mut OpenAdapterFromLuid) -> i32;
+#[cfg(windows)]
 type FnQuery = unsafe extern "system" fn(*const QueryAdapterInfo) -> i32;
+#[cfg(windows)]
 type FnClose = unsafe extern "system" fn(*const CloseAdapter) -> i32;
 
+#[cfg(windows)]
 /// Zugriff auf einen Adapter über D3DKMT (gdi32.dll).
 pub struct Kmt {
     query: FnQuery,
@@ -80,8 +98,10 @@ pub struct Kmt {
     h: u32,
 }
 
+#[cfg(windows)]
 unsafe impl Send for Kmt {}
 
+#[cfg(windows)]
 impl Kmt {
     pub fn open(a: &DxgiAdapter) -> Option<Kmt> {
         unsafe {
@@ -130,6 +150,7 @@ impl Kmt {
     }
 }
 
+#[cfg(windows)]
 impl Drop for Kmt {
     fn drop(&mut self) {
         let c = CloseAdapter { h_adapter: self.h };
@@ -139,6 +160,7 @@ impl Drop for Kmt {
     }
 }
 
+#[cfg(windows)]
 /// Leichte Leistungsindikator-Abfrage für Auslastung und belegten VRAM eines Adapters.
 struct LightPdh {
     q: Query,
@@ -146,6 +168,7 @@ struct LightPdh {
     mem: Option<Counter>,
 }
 
+#[cfg(windows)]
 impl LightPdh {
     fn new() -> Option<LightPdh> {
         let q = Query::new()?;
@@ -182,18 +205,21 @@ pub fn auto_adapter(list: &[DxgiAdapter]) -> Option<&DxgiAdapter> {
     list.iter().max_by(|a, b| a.dedicated.total_cmp(&b.dedicated))
 }
 
+#[cfg(windows)]
 enum Backend {
     Nvml(NvGpu),
     Windows { kmt: Option<Kmt>, pdh: Option<LightPdh> },
     None,
 }
 
+#[cfg(windows)]
 pub struct Gpu {
     wanted: String,
     adapter: Option<DxgiAdapter>,
     backend: Backend,
 }
 
+#[cfg(windows)]
 impl Gpu {
     pub fn new(wanted: &str) -> Gpu {
         Self::build(wanted, false)
@@ -244,9 +270,79 @@ impl Gpu {
                     mem_used,
                     mem_total: a.map(|a| a.dedicated).filter(|d| *d > 0.0),
                     power_w: None,
+                    ..Default::default()
                 }
             }
             Backend::None => GpuSample::default(),
+        }
+    }
+}
+
+// ------------------------------------------------------------------ Linux: NVML bzw. amdgpu/i915 über /sys
+
+#[cfg_attr(windows, allow(dead_code))]
+/// Aktiver Eintrag aus pp_dpm_sclk/pp_dpm_mclk (amdgpu), z. B. "1: 2100Mhz *" → 2100
+pub fn dpm_current_mhz(text: &str) -> Option<f64> {
+    text.lines().find(|l| l.trim_end().ends_with('*')).and_then(|l| {
+        let v = l.split_whitespace().nth(1)?;
+        v.to_lowercase().trim_end_matches("mhz").parse().ok()
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub struct Gpu {
+    wanted: String,
+    adapter: Option<DxgiAdapter>,
+    nv: Option<NvGpu>,
+}
+
+#[cfg(target_os = "linux")]
+impl Gpu {
+    pub fn new(wanted: &str) -> Gpu {
+        let list = super::gpu_proc::dxgi_adapters();
+        let adapter = if wanted.is_empty() { auto_adapter(&list) } else { list.iter().find(|a| a.luid == wanted).or(auto_adapter(&list)) }.cloned();
+        let nv = adapter.as_ref().filter(|a| a.vendor_id == NVIDIA).and_then(|_| NvGpu::new());
+        Gpu { wanted: wanted.to_string(), adapter, nv }
+    }
+
+    pub fn new_windows_only(wanted: &str) -> Gpu {
+        Self::new(wanted)
+    }
+
+    pub fn wanted(&self) -> &str {
+        &self.wanted
+    }
+
+    pub fn sample(&mut self) -> GpuSample {
+        if let Some(n) = &self.nv {
+            return n.sample();
+        }
+        use super::sysfs::{read, read_f64};
+        let Some(a) = self.adapter.as_ref() else { return GpuSample::default() };
+        let dev = std::path::PathBuf::from(format!("/sys/class/drm/{}/device", a.luid));
+        let hw = super::sysfs::dirs(dev.join("hwmon")).into_iter().next();
+        // Temperatur: „junction“ (heißeste Stelle) wie der Windows-Task-Manager, sonst „edge“
+        let temp_c = hw.as_ref().and_then(|h| {
+            let t = super::cputemp::hwmon_temps(h);
+            t.iter().find(|(l, _)| l == "junction").or_else(|| t.iter().find(|(l, _)| l == "edge")).or(t.first()).map(|x| x.1)
+        });
+        let power_w = hw.as_ref().and_then(|h| read_f64(h.join("power1_average")).or_else(|| read_f64(h.join("power1_input")))).map(|uw| uw / 1e6);
+        let card = format!("/sys/class/drm/{}", a.luid);
+        let clock_mhz = read(dev.join("pp_dpm_sclk"))
+            .and_then(|t| dpm_current_mhz(&t))
+            .or_else(|| read_f64(format!("{card}/gt_cur_freq_mhz")))
+            .or_else(|| read_f64(format!("{card}/gt/gt0/rps_cur_freq_mhz")));
+        GpuSample {
+            name: Some(a.name.clone()),
+            source: Some(format!("Linux ({}), {}", a.driver.clone().unwrap_or_default(), a.vendor_name())),
+            temp_c,
+            load_pct: read_f64(dev.join("gpu_busy_percent")),
+            clock_mhz,
+            mem_clock_mhz: read(dev.join("pp_dpm_mclk")).and_then(|t| dpm_current_mhz(&t)),
+            mem_used: read_f64(dev.join("mem_info_vram_used")),
+            mem_total: read_f64(dev.join("mem_info_vram_total")).or(Some(a.dedicated)).filter(|d| *d > 0.0),
+            power_w,
+            ..Default::default()
         }
     }
 }
@@ -255,6 +351,7 @@ impl Gpu {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn struct_sizes_match_windows_sdk() {
         // Größen aus d3dkmthk.h (x64)
@@ -289,6 +386,12 @@ mod tests {
         assert_eq!(x.driver_display().as_deref(), Some("560.94 (32.0.15.6094)"));
         assert_eq!(crate::sensors::gpu_proc::nvidia_driver("31.0.15.5222").as_deref(), Some("552.22"));
         assert_eq!(crate::sensors::gpu_proc::nvidia_driver("x"), None);
+    }
+
+    #[test]
+    fn amdgpu_dpm() {
+        assert_eq!(dpm_current_mhz("0: 500Mhz\n1: 1800Mhz\n2: 2600Mhz *\n"), Some(2600.0));
+        assert_eq!(dpm_current_mhz("0: 96Mhz\n"), None);
     }
 
     #[test]

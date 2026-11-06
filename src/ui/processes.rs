@@ -282,7 +282,8 @@ fn header_cell(ui: &mut egui::Ui, st: &mut ProcState, col: SortCol, total: &str,
             });
         })
         .response;
-    let resp = ui.interact(r.rect, ui.id().with(label), Sense::click());
+    // Ganze Zelle anklickbar (nicht nur die Schrift)
+    let resp = ui.interact(ui.max_rect().union(r.rect), ui.id().with(label), Sense::click());
     let resp = if let Some(t) = tip { resp.on_hover_text(t) } else { resp };
     if resp.clicked() {
         if st.sort == col {
@@ -429,6 +430,8 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
     let selected = st.selected.clone();
 
     let k = scale(ui);
+    // Schrift nicht markierbar – sonst fängt der Text den Klick ab und die Zeile wird nicht ausgewählt
+    ui.style_mut().interaction.selectable_labels = false;
     let mut tb = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)

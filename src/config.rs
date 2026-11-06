@@ -20,10 +20,12 @@ pub enum Field {
     GpuMem,
     CpuPower,
     GpuPower,
+    GpuHotspot,
+    GpuMemTemp,
 }
 
 impl Field {
-    pub const ALL: [Field; 12] = [
+    pub const ALL: [Field; 14] = [
         Field::Up,
         Field::Down,
         Field::CpuLoad,
@@ -36,7 +38,12 @@ impl Field {
         Field::GpuMem,
         Field::CpuPower,
         Field::GpuPower,
+        Field::GpuHotspot,
+        Field::GpuMemTemp,
     ];
+
+    /// Neuere Zusatzfelder, die anfangs ausgeblendet sind (die Anzeige soll nicht von selbst breiter werden)
+    pub const OPTIONAL: [Field; 2] = [Field::GpuHotspot, Field::GpuMemTemp];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -52,6 +59,8 @@ impl Field {
             Field::GpuMem => "GPU VRAM (Grafikspeicher)",
             Field::CpuPower => "CPU-Leistung (Watt)",
             Field::GpuPower => "GPU-Leistung (Watt)",
+            Field::GpuHotspot => "GPU Hot-Spot (NVIDIA RTX 50, Admin)",
+            Field::GpuMemTemp => "GPU-Speichertemperatur (NVIDIA RTX 30–50, Admin)",
         }
     }
 }
@@ -194,7 +203,7 @@ impl Default for TaskbarConfig {
         TaskbarConfig {
             enabled: true,
             fields: Field::ALL.to_vec(),
-            hidden: vec![],
+            hidden: Field::OPTIONAL.to_vec(),
             side: Side::Right,
             offset_px: 10,
             monitor: 0,
@@ -235,6 +244,8 @@ pub struct Config {
     pub cpu_freq_mode: CpuFreqMode,
     /// CPU-Temperatur über PawnIO lesen (abschaltbar, falls Antivirus/Anti-Cheat stört).
     pub use_pawnio: bool,
+    /// Temperatur der Speicherriegel über den SMBus lesen (nur mit PawnIO/Adminrechten).
+    pub ram_sensors: bool,
     pub heatmap: Heatmap,
     pub mem_unit: MemUnit,
     pub decimals: usize,
@@ -299,6 +310,7 @@ impl Default for Config {
             net_adapter: String::new(),
             cpu_freq_mode: CpuFreqMode::MaxCore,
             use_pawnio: true,
+            ram_sensors: true,
             heatmap: Heatmap::default(),
             mem_unit: MemUnit::Auto,
             decimals: 1,
@@ -323,7 +335,15 @@ impl Config {
         if let Some(p) = std::env::var_os("TASKPULSE_CONFIG_DIR") {
             return PathBuf::from(p);
         }
+        // Windows: %APPDATA%\TaskPulse; Linux: $XDG_CONFIG_HOME/TaskPulse bzw. ~/.config/TaskPulse
+        #[cfg(windows)]
         let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        #[cfg(not(windows))]
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .unwrap_or_else(|| PathBuf::from("."));
         base.join("TaskPulse")
     }
 
@@ -387,6 +407,10 @@ impl Config {
         for f in Field::ALL {
             if !tb.fields.contains(&f) {
                 tb.fields.push(f);
+                // Neu hinzugekommene Zusatzfelder erst einmal ausgeblendet
+                if Field::OPTIONAL.contains(&f) && !tb.hidden.contains(&f) {
+                    tb.hidden.push(f);
+                }
             }
         }
         tb.offset_px = tb.offset_px.max(0);
@@ -441,6 +465,19 @@ mod tests {
         assert_eq!(c.line_up_mbit, 40.0);
         assert_eq!(c.taskbar.interval_ms, 1000);
         assert_eq!(c.taskbar.fields.len(), Field::ALL.len());
+    }
+
+    #[test]
+    fn new_fields_start_hidden() {
+        // Alte Einstellungen ohne die neuen Felder: werden angehängt, aber ausgeblendet
+        let mut c = Config::default();
+        c.taskbar.fields.retain(|f| !Field::OPTIONAL.contains(f));
+        c.taskbar.hidden.clear();
+        let c = c.sanitized();
+        assert!(c.taskbar.fields.contains(&Field::GpuHotspot));
+        assert!(!c.taskbar.visible_fields().contains(&Field::GpuHotspot));
+        assert!(!c.taskbar.visible_fields().contains(&Field::GpuMemTemp));
+        assert!(!Config::default().taskbar.visible_fields().contains(&Field::GpuHotspot));
     }
 
     #[test]

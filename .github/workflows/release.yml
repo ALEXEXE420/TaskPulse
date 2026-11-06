@@ -1,5 +1,7 @@
-# Bei einem Tag "v1.2.3": TaskPulse bauen und als Release mit TaskPulse-Setup.exe veröffentlichen.
-# Installierte TaskPulse-Versionen holen sich genau diese Datei als Update.
+# Bei einem Tag "v1.2.3": TaskPulse bauen und als Release veröffentlichen –
+# TaskPulse-Setup.exe (x64), TaskPulse-Setup-ARM64.exe (Windows auf ARM, z. B. RTX Spark N1X)
+# und TaskPulse-x86_64.AppImage (Linux).
+# Installierte TaskPulse-Versionen holen sich die passende Datei als Update.
 name: Release
 
 on:
@@ -15,6 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
 
       - name: Tag und Cargo.toml-Version vergleichen
@@ -26,14 +30,20 @@ jobs:
       - name: Tests
         run: cargo test
 
-      - name: Bauen
+      - name: Bauen (x64)
         run: cargo build --release
+
+      - name: Bauen (ARM64)
+        run: cargo build --release --target aarch64-pc-windows-msvc
 
       - name: Installer bereitstellen
         shell: pwsh
         run: |
           Copy-Item target/release/TaskPulse.exe TaskPulse-Setup.exe
-          (Get-FileHash TaskPulse-Setup.exe -Algorithm SHA256).Hash.ToLower() + "  TaskPulse-Setup.exe" | Out-File -Encoding ascii TaskPulse-Setup.exe.sha256
+          Copy-Item target/aarch64-pc-windows-msvc/release/TaskPulse.exe TaskPulse-Setup-ARM64.exe
+          foreach ($f in "TaskPulse-Setup.exe", "TaskPulse-Setup-ARM64.exe") {
+            (Get-FileHash $f -Algorithm SHA256).Hash.ToLower() + "  $f" | Out-File -Encoding ascii "$f.sha256"
+          }
 
       - name: Änderungen dieser Version aus CHANGELOG.md
         shell: pwsh
@@ -50,4 +60,43 @@ jobs:
           files: |
             TaskPulse-Setup.exe
             TaskPulse-Setup.exe.sha256
+            TaskPulse-Setup-ARM64.exe
+            TaskPulse-Setup-ARM64.exe.sha256
           generate_release_notes: true
+
+  linux:
+    # Linux-Version als AppImage – nach dem Windows-Teil, der das Release mit Beschreibung anlegt
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Pakete für den Bau
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+
+      - name: Tests
+        run: cargo test
+
+      - name: Bauen
+        run: cargo build --release
+
+      - name: AppImage erstellen
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
+          cp target/release/TaskPulse AppDir/usr/bin/TaskPulse
+          cp resources/linux/AppRun AppDir/AppRun && chmod +x AppDir/AppRun
+          cp resources/linux/taskpulse.desktop AppDir/taskpulse.desktop
+          cp resources/icon/taskpulse_256.png AppDir/taskpulse.png
+          cp resources/icon/taskpulse_256.png AppDir/usr/share/icons/hicolor/256x256/apps/taskpulse.png
+          curl -sSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./appimagetool AppDir TaskPulse-x86_64.AppImage
+          sha256sum TaskPulse-x86_64.AppImage > TaskPulse-x86_64.AppImage.sha256
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            TaskPulse-x86_64.AppImage
+            TaskPulse-x86_64.AppImage.sha256
