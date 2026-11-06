@@ -19,6 +19,10 @@ Windows 10 (2004 oder neuer) und Windows 11. Was sich in welcher Version geände
 - **Prozesse:** CPU, Arbeitsspeicher, Datenträger, **GPU-Auslastung, GPU-Engine, VRAM und VRAM-Anteil je Prozess**, gruppiert wie im Windows-Task-Manager, mit Farbskala. „Task beenden“ per Knopf oder Entf.
 - **Leistung:** Verlaufsgrafiken für CPU, Arbeitsspeicher, jeden Datenträger einzeln, Netzwerk und GPU (alle Engines, Kartenhersteller, Treiber).
   - **CPU-Aufbau:** logische Prozessoren nach **CCD** (AMD Ryzen, Threadripper, EPYC) bzw. **P-, E- und LP-E-Kernen** (Intel), je Kern Takt, Auslastung, Watt, Spannung und Temperatur.
+  - **Arbeitsspeicher:** jeder Riegel einzeln mit Temperatur, dazu die laufenden RAM-Timings.
+  - **Grafikkarte:** Hot-Spot- und Speichertemperatur (NVIDIA RTX 30–50), PCIe-Verbindung.
+  - **Spezifikation:** ausklappbar für CPU und GPU (ähnlich wie CPU-Z und GPU-Z), mit theoretischer GPU- und KI-Rechenleistung.
+  - **Datenträger:** Namen wie im Explorer, mit Modell und Temperatur.
 - **Benchmark:** Aufzeichnung im Sekundentakt mit Graphen für **FPS, Frametimes, 1 % und 0,1 % Low, Ruckler**, Temperaturen, Takt, Auslastung und Watt. FPS über die Windows-Grafik-Ereignisse (wie PresentMon) – ohne sich ins Spiel einzuklinken. Export als Log (für KI/Excel) und CSV.
 - **Taskleisten-Anzeige**, die auch ohne Hauptfenster läuft:
   - Upload und Download, auf Wunsch mit Auslastung der Leitung in %
@@ -30,11 +34,54 @@ Windows 10 (2004 oder neuer) und Windows 11. Was sich in welcher Version geände
 - **Hersteller:**
   - Grafikkarten von NVIDIA laufen über NVML (mit Watt), AMD und Intel über die Windows-Schnittstellen.
   - Für CPU-Temperatur und -Watt bei AMD (Ryzen) und Intel wird der Treiber [PawnIO](https://pawnio.eu/) gebraucht.
-- **Weitere Funktionen:** Autostart, „immer mit Adminrechten“ ohne UAC-Abfrage, Installer, automatische Updates mit Änderungsprotokoll, Fehlerberichte und Diagnosebericht.
+- **Autostart-Verwaltung:** Programme, die beim Anmelden starten, getrennt nach ein- und ausgeschaltet; per Schalter umstellen oder neue Apps hinzufügen.
+- **Weitere Funktionen:** „immer mit Adminrechten“ ohne UAC-Abfrage, Installer, automatische Updates mit Änderungsprotokoll, Fehlerberichte und Diagnosebericht.
 
-![Leistung – CPU nach CCD](docs/leistung_ccd.png)
+## Bilder
+
+### Prozesse
+GPU-Auslastung, GPU-Engine und VRAM je Prozess, gruppiert wie im Windows-Task-Manager, mit Farbskala.
+
+![Prozesse](docs/prozesse.png)
+
+### Leistung – CPU
+Jeder Kern mit Takt, Auslastung, Watt und Spannung, nach CCD gruppiert (bei Intel nach P-, E- und LP-E-Kernen). Darunter lässt sich die **Spezifikation** ausklappen, ähnlich wie bei CPU-Z: Cache, Befehlssätze, Mainboard und BIOS.
+
+![Leistung – CPU](docs/leistung_cpu.png)
+
+![Leistung – CPU-Spezifikation](docs/leistung_cpu_spec.png)
+
+### Leistung – Arbeitsspeicher
+Jeder RAM-Riegel einzeln mit Hersteller, Modell und Temperatur, dazu die laufenden **Timings** direkt aus dem Speichercontroller.
+
+![Leistung – Arbeitsspeicher](docs/leistung_ram.png)
+
+### Leistung – Grafikkarte
+Alle GPU-Engines, Hot-Spot- und Speichertemperatur (NVIDIA RTX 30–50) und PCIe-Verbindung. Die Spezifikation zeigt, ähnlich wie GPU-Z, unter anderem Architektur, Speicherbandbreite, Resizable BAR sowie die theoretische GPU- und KI-Rechenleistung.
+
+![Leistung – Grafikkarte](docs/leistung_gpu.png)
+
+![Leistung – GPU-Spezifikation](docs/leistung_gpu_spec.png)
+
+### Leistung – Datenträger
+Namen wie im Explorer, nach Laufwerksbuchstaben sortiert, mit Modell, Typ und Temperatur. Laufwerke im Verbund und leere USB-Adapter werden als solche gekennzeichnet.
+
+![Leistung – Datenträger](docs/leistung_datentraeger.png)
+
+### Autostart
+Übersichtlich getrennt nach eingeschalteten und ausgeschalteten Programmen. Jedes lässt sich per Schalter umstellen, neue Apps kannst du hinzufügen.
+
+![Autostart](docs/autostart.png)
+
+### Benchmark
+FPS, Frametimes, 1 % und 0,1 % Low und Ruckler, Export als Log und CSV (Bild mit Beispielwerten).
 
 ![Benchmark (Beispielwerte)](docs/benchmark.png)
+
+### Einstellungen
+Die Felder der Taskleisten-Anzeige lassen sich frei auswählen und anordnen, mit Vorschau der aktuellen Werte.
+
+![Einstellungen](docs/einstellungen.png)
 
 ## Installation
 

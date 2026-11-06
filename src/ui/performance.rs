@@ -128,6 +128,13 @@ fn grow_width(ui: &egui::Ui, id: egui::Id, w: f32) -> f32 {
 fn stat(ui: &mut egui::Ui, label: &str, value: String) {
     let id = ui.id().with(("stat_w", label));
     let min = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    // In einer umbrechenden Zeile: passt der Wert nicht mehr hinein, in die nächste Zeile
+    // (sonst wird er am rechten Rand abgeschnitten)
+    // (sichtbare Breite: der Inhalt einer Scrollfläche kann breiter sein als ihr Ausschnitt)
+    let room = ui.available_width().min(ui.clip_rect().right() - ui.cursor().left());
+    if min > 0.0 && room < min + 4.0 && ui.layout().main_wrap {
+        ui.end_row();
+    }
     let r = ui
         .vertical(|ui| {
             ui.set_min_width(min);
@@ -808,7 +815,8 @@ fn disk_cards(ui: &mut egui::Ui, w: f32, d: &crate::sensors::mem::DiskOne) {
 /// Ausklappbare Spezifikation (wie GPU-Z / CPU-Z): je Abschnitt eine Karte mit Bezeichnung und Wert.
 fn spec_view(ui: &mut egui::Ui, w: f32, id: &str, spec: &crate::sensors::spec::Spec, color: Color32) {
     ui.add_space(8.0);
-    egui::CollapsingHeader::new(RichText::new("Spezifikation").strong().size(17.0).color(color)).id_salt(id).default_open(std::env::var_os("TASKPULSE_SPEC_OFFEN").is_some()).show(ui, |ui| {
+    let screenshot = std::env::var_os("TASKPULSE_SPEC_OFFEN").is_some();
+    let r = egui::CollapsingHeader::new(RichText::new("Spezifikation").strong().size(17.0).color(color)).id_salt(id).default_open(screenshot).show(ui, |ui| {
         if spec.sections.is_empty() {
             ui.label(RichText::new("Noch keine Angaben – einen Moment …").weak());
             return;
@@ -846,6 +854,10 @@ fn spec_view(ui: &mut egui::Ui, w: f32, id: &str, spec: &crate::sensors::spec::S
             .wrap(),
         );
     });
+    // Nur für Bildschirmfotos: in den ersten Sekunden zur Spezifikation scrollen
+    if screenshot && !spec.sections.is_empty() && ui.ctx().input(|i| i.time) < 30.0 {
+        r.header_response.scroll_to_me(Some(egui::Align::Min));
+    }
 }
 
 /// Datenträger (alle): Liste mit Name, Typ, Größe, Temperatur und Aktivität.

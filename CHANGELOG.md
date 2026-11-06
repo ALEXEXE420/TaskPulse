@@ -6,6 +6,10 @@ Derselbe Text erscheint auf GitHub beim Release und in TaskPulse unter Einstellu
 
 ## Unveröffentlicht
 
+- Leistung → Grafikkarte: Bei schmalerem Fenster wurden die Werte unter dem Graphen rechts abgeschnitten (z. B. „Leistungsaufnahme“). Was nicht mehr in die Zeile passt, rutscht jetzt in die nächste Zeile.
+- Prozesse: Bei Prozessgruppen ohne Grafikspeicher stand „-0,00 GB“ bzw. „-0 %“ beim VRAM. Jetzt steht dort „0,00 GB“ bzw. „0 %“.
+- GitHub-Seite: neue Bilder von allen Seiten (Prozesse, CPU, Arbeitsspeicher, Grafikkarte, Datenträger, Autostart, Benchmark, Einstellungen).
+
 ## 0.1.8 – 2026-11-06
 
 - ARM: Eigene, native ARM64-Version für Windows auf ARM (z. B. NVIDIA RTX Spark N1X, Qualcomm Snapdragon X) – läuft ohne x64-Emulation; damit funktionieren dort auch die NVIDIA-Werte über NVML (Auslastung, Temperatur, Takt, Watt). Jedes Release enthält zusätzlich TaskPulse-Setup-ARM64.exe.

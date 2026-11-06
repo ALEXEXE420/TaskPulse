@@ -77,7 +77,13 @@ pub const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// Deutsches Zahlenformat mit Komma.
 pub fn de(v: f64, decimals: usize) -> String {
-    format!("{v:.decimals$}").replace('.', ",")
+    let s = format!("{v:.decimals$}");
+    // „-0,00“ vermeiden: -0.0 (z. B. Summe einer leeren Liste) oder winzige negative Rundungsreste
+    let s = match s.strip_prefix('-') {
+        Some(rest) if rest.chars().all(|c| c == '0' || c == '.') => rest.to_string(),
+        _ => s,
+    };
+    s.replace('.', ",")
 }
 
 /// Speicher (Bytes) im Hauptfenster: "6,2 GB" / "512,0 MB".
@@ -127,6 +133,15 @@ pub fn freq_from_cores(cores_mhz: &[f64], average: bool) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn de_no_negative_zero() {
+        let empty: f64 = Vec::<f64>::new().into_iter().sum();
+        assert_eq!(de(empty, 2), "0,00");
+        assert_eq!(de(-0.001, 2), "0,00");
+        assert_eq!(de(-1.5, 1), "-1,5");
+        assert_eq!(pct_de(-0.0, 0), "0 %");
+    }
+
     use super::*;
 
     #[test]
