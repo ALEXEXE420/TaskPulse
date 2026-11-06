@@ -485,13 +485,23 @@ mod tests {
 
     #[test]
     fn release_json() {
+        // Ein Release mit allen Dateien – jedes System muss seine eigene finden
+        // (Windows x64/ARM64: Setup-Datei, Linux: AppImage)
         let j = br#"{"tag_name":"v0.2.0","html_url":"https://github.com/a/b/releases/tag/v0.2.0","body":"Neu",
             "assets":[{"name":"other.zip","size":1,"browser_download_url":"x"},
-                      {"name":"TaskPulse-Setup.exe","size":5930496,"browser_download_url":"https://github.com/a/b/releases/download/v0.2.0/TaskPulse-Setup.exe"}]}"#;
+                      {"name":"TaskPulse-Setup.exe","size":5930496,"browser_download_url":"https://github.com/a/b/releases/download/v0.2.0/TaskPulse-Setup.exe"},
+                      {"name":"TaskPulse-Setup-ARM64.exe","size":5000000,"browser_download_url":"https://github.com/a/b/releases/download/v0.2.0/TaskPulse-Setup-ARM64.exe"},
+                      {"name":"TaskPulse-x86_64.AppImage","size":7000000,"browser_download_url":"https://github.com/a/b/releases/download/v0.2.0/TaskPulse-x86_64.AppImage"},
+                      {"name":"TaskPulse-aarch64.AppImage","size":6500000,"browser_download_url":"https://github.com/a/b/releases/download/v0.2.0/TaskPulse-aarch64.AppImage"}]}"#;
         let r = parse_release(j).unwrap();
         assert_eq!(r.version, "0.2.0");
-        assert_eq!(r.asset_size, 5930496);
-        assert!(r.asset_url.ends_with("/TaskPulse-Setup.exe"));
+        let want = asset_names()[0];
+        assert!(r.asset_url.ends_with(&format!("/{want}")), "{} statt {want}", r.asset_url);
+        assert!(r.asset_size > 1);
+        // Fehlt die Datei für dieses System, bleibt die Adresse leer (kein Update mit einer falschen Datei)
+        let only_other = br#"{"tag_name":"v0.2.0","html_url":"h","body":"",
+            "assets":[{"name":"other.zip","size":1,"browser_download_url":"x"}]}"#;
+        assert!(parse_release(only_other).unwrap().asset_url.is_empty());
         assert!(parse_release(b"{}").is_err());
     }
 }
