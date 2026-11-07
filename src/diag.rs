@@ -581,8 +581,17 @@ pub fn diagnose(extra: &str) -> Option<PathBuf> {
             d.volts
         );
     }
+    {
+        let ci = crate::sensors::cputemp::cpu_info();
+        b += &format!("CPU-Kennung: {} · Familie {:X}h · Modell {:X}h · {}\n", ci.vendor, ci.family, ci.model, ci.brand);
+    }
     #[cfg(windows)]
     if let Ok(t) = crate::sensors::cputemp::CpuTemp::open() {
+        let probe = t.intel_probe();
+        if !probe.is_empty() {
+            b += &format!("Intel-Register: {probe}\n");
+        }
+        b += &format!("CPU-Temperatur jetzt: {:?} °C\n", t.read());
         for x in t.ram_timings() {
             b += &format!("RAM-Timings Kanal {}: {:?}\n", x.channel, x);
         }
@@ -590,18 +599,31 @@ pub fn diagnose(extra: &str) -> Option<PathBuf> {
         if !raw.is_empty() {
             b += &format!("UMC-Register: {}\n", raw.join(" "));
         }
+    }
+    // Ab hier unabhängig davon, ob die CPU-Sensoren geklappt haben
+    #[cfg(windows)]
+    {
         // Datenträger: Name und Temperatur (mit Adminrechten lesbar)
         if let Some(mut d) = crate::sensors::mem::Disk::new() {
             for x in d.sample().disks {
                 b += &format!("Datenträger {}: {} · {} · {:?} °C\n", x.index, x.title(), x.info.model.clone().unwrap_or_default(), x.temp_c);
             }
         }
-        // NVIDIA: Hot-Spot und Speichertemperatur über das PawnIO-Modul „Nvidia“
+        // NVIDIA: Hot-Spot und Speichertemperatur – NVAPI (RTX 30/40) und PawnIO-Modul „Nvidia“
         match crate::sensors::nvgpu::NvGpu::new().and_then(|n| n.bus_id()) {
-            Some(id) => match crate::sensors::nvtemp::NvRegTemps::open(&id) {
-                Some(r) => b += &format!("GPU-Zusatztemperaturen ({id}): {:?}\n", r.read()),
-                None => b += &format!("GPU-Zusatztemperaturen ({id}): nicht lesbar (Karte zu alt oder Modul nicht geladen)\n"),
-            },
+            Some(id) => {
+                match crate::sensors::nvtemp::parse_bus_id(&id).and_then(|(bus, _, _)| crate::sensors::nvapi::NvApiTemps::open(bus)) {
+                    Some(a) => {
+                        let (h, m) = a.read();
+                        b += &format!("GPU-Zusatztemperaturen NVAPI ({id}, genutzt nur bis RTX 40): Hot-Spot {h:?} °C, Speicher {m:?} °C – Felder {}\n", a.raw());
+                    }
+                    None => b += &format!("GPU-Zusatztemperaturen NVAPI ({id}): keine Werte\n"),
+                }
+                match crate::sensors::nvtemp::NvRegTemps::open(&id) {
+                    Some(r) => b += &format!("GPU-Zusatztemperaturen PawnIO ({id}): {:?}\n", r.read()),
+                    None => b += &format!("GPU-Zusatztemperaturen PawnIO ({id}): nicht lesbar (Adminrechte/PawnIO fehlen oder Karte nicht unterstützt)\n"),
+                }
+            }
             None => b += "GPU-Zusatztemperaturen: keine NVIDIA-Karte über NVML\n",
         }
         let intel = crate::sensors::cputemp::cpu_info().vendor.contains("Intel");

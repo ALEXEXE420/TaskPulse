@@ -59,8 +59,8 @@ impl Field {
             Field::GpuMem => "GPU VRAM (Grafikspeicher)",
             Field::CpuPower => "CPU-Leistung (Watt)",
             Field::GpuPower => "GPU-Leistung (Watt)",
-            Field::GpuHotspot => "GPU Hot-Spot (NVIDIA RTX 50, Admin)",
-            Field::GpuMemTemp => "GPU-Speichertemperatur (NVIDIA RTX 30–50, Admin)",
+            Field::GpuHotspot => "GPU Hot-Spot (NVIDIA RTX 30–50)",
+            Field::GpuMemTemp => "GPU-Speichertemperatur (NVIDIA RTX 30–50)",
         }
     }
 }

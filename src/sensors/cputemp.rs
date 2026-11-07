@@ -336,9 +336,24 @@ impl CpuTemp {
                     t.read_smn(SMN_THM_TCON_CUR_TMP).ok_or_else(|| TempStatus::Failed("SMN-Lesen fehlgeschlagen".into()))?;
                 }
                 Vendor::Intel => {
-                    t.tjmax = t.read_msr(MSR_IA32_TEMPERATURE_TARGET).map(|v| intel_tjmax(v)).unwrap_or(100.0);
-                    t.energy_unit_j = t.read_msr(MSR_RAPL_POWER_UNIT).map(|v| energy_unit(v as u32));
-                    t.read().ok_or_else(|| TempStatus::Failed("Intel-Temperatur nicht lesbar".into()))?;
+                    // Jeder Wert für sich: fehlt einer (z. B. RAPL bei manchen Mobil-/Server-CPUs),
+                    // bleiben die anderen trotzdem sichtbar.
+                    t.tjmax = t.read_msr(MSR_IA32_TEMPERATURE_TARGET).map(intel_tjmax).unwrap_or(100.0);
+                    t.energy_unit_j = t.read_msr(MSR_RAPL_POWER_UNIT).map(|v| energy_unit(v as u32)).filter(|u| *u > 0.0 && *u < 1.0);
+                    let temp_ok = t.read().is_some();
+                    let energy_ok = t.energy_unit_j.is_some() && t.read_msr(MSR_PKG_ENERGY_STATUS).is_some();
+                    crate::diag::log(format!(
+                        "CPU-Sensoren Intel (Familie {:X}h, Modell {:X}h): TjMax {:.0} °C, Temperatur {}, Watt {} – {}",
+                        info.family,
+                        info.model,
+                        t.tjmax,
+                        if temp_ok { "ja" } else { "nein" },
+                        if energy_ok { "ja" } else { "nein" },
+                        t.intel_probe()
+                    ));
+                    if !temp_ok && !energy_ok {
+                        return Err(TempStatus::Failed(format!("Intel-Register nicht lesbar ({})", t.intel_probe())));
+                    }
                 }
             }
             Ok(t)
@@ -354,11 +369,41 @@ impl CpuTemp {
     }
 
     fn read_msr(&self, msr: u64) -> Option<u64> {
+        self.read_msr_status(msr).ok()
+    }
+
+    /// MSR lesen; im Fehlerfall der Rückgabewert von PawnIO (für Diagnose)
+    fn read_msr_status(&self, msr: u64) -> Result<u64, i32> {
         let input = [msr];
         let mut out = [0u64; 1];
         let mut ret = 0usize;
         let hr = unsafe { (self.exec)(self.handle, s!("ioctl_read_msr"), input.as_ptr(), 1, out.as_mut_ptr(), 1, &mut ret) };
-        (hr >= 0 && ret >= 1).then_some(out[0])
+        if hr >= 0 && ret >= 1 {
+            Ok(out[0])
+        } else {
+            Err(if hr < 0 { hr } else { -1 })
+        }
+    }
+
+    /// Intel: Rohwerte der benutzten Register (für Protokoll und Diagnosebericht)
+    pub fn intel_probe(&self) -> String {
+        if self.vendor != Vendor::Intel {
+            return String::new();
+        }
+        [
+            ("TEMP_TARGET", MSR_IA32_TEMPERATURE_TARGET),
+            ("PKG_THERM", MSR_IA32_PACKAGE_THERM_STATUS),
+            ("THERM", MSR_IA32_THERM_STATUS),
+            ("RAPL_UNIT", MSR_RAPL_POWER_UNIT),
+            ("PKG_ENERGY", MSR_PKG_ENERGY_STATUS),
+        ]
+        .iter()
+        .map(|(n, m)| match self.read_msr_status(*m) {
+            Ok(v) => format!("{n}=0x{v:X}"),
+            Err(e) => format!("{n}: Fehler 0x{:08X}", e as u32),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
     }
 
     /// Leistungsaufnahme des ganzen Prozessors (Package) in Watt, aus der Energiedifferenz.
@@ -449,9 +494,9 @@ impl CpuTemp {
             Vendor::Amd => decode_tctl(self.read_smn(SMN_THM_TCON_CUR_TMP)?, self.offset),
             Vendor::Intel => {
                 // Package-Sensor, sonst Kernsensor des aktuellen Kerns (Bit 31 = Wert gültig)
-                match self.read_msr(MSR_IA32_PACKAGE_THERM_STATUS) {
-                    Some(v) if v != 0 => intel_temp(self.tjmax, v),
-                    _ => {
+                match self.read_msr(MSR_IA32_PACKAGE_THERM_STATUS).filter(|v| *v != 0).map(|v| intel_temp(self.tjmax, v)).filter(|t| (-20.0..150.0).contains(t)) {
+                    Some(t) => t,
+                    None => {
                         let v = self.read_msr(MSR_IA32_THERM_STATUS)?;
                         if v & (1 << 31) == 0 {
                             return None;

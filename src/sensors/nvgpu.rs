@@ -15,9 +15,9 @@ pub struct GpuSample {
     pub mem_used: Option<f64>,
     pub mem_total: Option<f64>,
     pub power_w: Option<f64>,
-    /// Heißeste Stelle des Grafikchips (NVIDIA RTX 50, über PawnIO, Adminrechte)
+    /// Heißeste Stelle des Grafikchips (NVIDIA RTX 30/40 über NVAPI, RTX 50 über PawnIO mit Adminrechten)
     pub hotspot_c: Option<f64>,
-    /// Heißester Speicherchip (NVIDIA RTX 30–50, über PawnIO, Adminrechte)
+    /// Heißester Speicherchip (NVAPI bei GDDR6X, sonst PawnIO mit Adminrechten)
     pub mem_temp_c: Option<f64>,
 }
 
@@ -49,6 +49,11 @@ impl NvGpu {
         let name = nvml.device_by_index(0).ok().and_then(|d| d.name().ok());
         let lib2 = unsafe { nvml_wrapper_sys::bindings::NvmlLib::new(if cfg!(windows) { "nvml.dll" } else { "libnvidia-ml.so.1" }).ok() };
         Some(NvGpu { nvml, lib2, index: 0, name })
+    }
+
+    /// RTX 50 (Blackwell) oder neuer? Dort meldet NVAPI keinen Hot-Spot mehr (Feld 1 = normale GPU-Temperatur).
+    pub fn blackwell_or_newer(&self) -> bool {
+        self.nvml.device_by_index(self.index).ok().and_then(|d| d.cuda_compute_capability().ok()).map(|c| c.major >= 10).unwrap_or(false)
     }
 
     /// PCI-Kennung der Karte, z. B. "00000000:0A:00.0"

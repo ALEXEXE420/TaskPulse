@@ -645,3 +645,58 @@ pub fn run(page: Option<Tab>) -> eframe::Result<()> {
     };
     eframe::run_native(winutil::MAIN_TITLE, options, Box::new(move |cc| Ok(Box::new(TaskPulseApp::new(cc, page)))))
 }
+
+/// Wurde PawnIO in diesem Lauf über den Knopf installiert? (Dann bleibt die Erfolgsmeldung sichtbar.)
+pub fn pawnio_state_done() -> bool {
+    #[cfg(windows)]
+    {
+        matches!(crate::pawnio_setup::state(), crate::pawnio_setup::State::Done)
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// Knopf „PawnIO installieren“ mit Fortschritt (Windows x64; sonst nichts).
+/// Lädt den signierten Installer des PawnIO-Entwicklers und startet ihn mit Adminrechten.
+pub fn pawnio_install_button(ui: &mut egui::Ui) {
+    #[cfg(windows)]
+    {
+        use crate::pawnio_setup::{start, state, State};
+        if crate::winutil::native_arm64() {
+            return;
+        }
+        match state() {
+            State::Working(t) => {
+                ui.spinner();
+                ui.label(egui::RichText::new(t).small());
+            }
+            State::Done => {
+                ui.label(egui::RichText::new("✔ PawnIO installiert").small().color(egui::Color32::from_rgb(40, 170, 110)));
+                if !crate::winutil::is_elevated() {
+                    ui.label(egui::RichText::new("– für die Werte TaskPulse mit Adminrechten starten (oben „Als Admin“)").small().weak());
+                }
+            }
+            s => {
+                if crate::installer::pawnio_installed() {
+                    return;
+                }
+                let ctx = ui.ctx().clone();
+                if ui
+                    .button("PawnIO installieren")
+                    .on_hover_text("Lädt den offiziellen PawnIO-Installer (github.com/namazso/PawnIO.Setup), prüft seine digitale Signatur und startet ihn – Windows fragt nach Adminrechten.")
+                    .clicked()
+                {
+                    start(move || ctx.request_repaint());
+                }
+                if ui.small_button("pawnio.eu").on_hover_text("Webseite von PawnIO öffnen").clicked() {
+                    crate::winutil::shell_open("https://pawnio.eu/");
+                }
+                if let State::Failed(e) = s {
+                    ui.label(egui::RichText::new(format!("Fehler: {e}")).small().color(egui::Color32::from_rgb(220, 120, 40)));
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = ui;
+}

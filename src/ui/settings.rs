@@ -339,7 +339,12 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
             } else {
                 ui.checkbox(&mut cfg.use_pawnio, "CPU-Temperatur und -Watt lesen (Linux-Sensoren hwmon und RAPL; Watt nur mit root)");
             }
-            ui.label(RichText::new(format!("Status: {}", basic.cpu_temp_status)).weak());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("Status: {}", basic.cpu_temp_status)).weak());
+                if basic.cpu_temp_status.contains("pawnio.eu") || crate::ui::pawnio_state_done() {
+                    crate::ui::pawnio_install_button(ui);
+                }
+            });
         });
 
         section(ui, "Prozesse: Darstellung", |ui| {

@@ -65,6 +65,15 @@ pub fn spawn_self(args: &[&str]) -> bool {
 
 /// Führt ein Programm mit Adminrechten aus und wartet auf das Ende. Rückgabe: Exitcode.
 pub fn run_elevated_wait(file: &str, params: &str) -> Option<u32> {
+    run_elevated_wait_show(file, params, false)
+}
+
+/// Wie `run_elevated_wait`, aber mit sichtbarem Fenster (z. B. für einen fremden Installer)
+pub fn run_elevated_wait_visible(file: &str, params: &str) -> Option<u32> {
+    run_elevated_wait_show(file, params, true)
+}
+
+fn run_elevated_wait_show(file: &str, params: &str, visible: bool) -> Option<u32> {
     unsafe {
         let file = HSTRING::from(file);
         let params = HSTRING::from(params);
@@ -74,7 +83,7 @@ pub fn run_elevated_wait(file: &str, params: &str) -> Option<u32> {
             lpVerb: w!("runas"),
             lpFile: PCWSTR(file.as_ptr()),
             lpParameters: PCWSTR(params.as_ptr()),
-            nShow: SW_HIDE.0,
+            nShow: if visible { SW_SHOWNORMAL.0 } else { SW_HIDE.0 },
             ..Default::default()
         };
         ShellExecuteExW(&mut info).ok()?;

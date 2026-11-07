@@ -31,6 +31,8 @@ mod installer;
 #[cfg(target_os = "linux")]
 #[path = "linux/installer.rs"]
 mod installer;
+#[cfg(windows)]
+mod pawnio_setup;
 mod sensors;
 #[cfg(windows)]
 mod taskbar;

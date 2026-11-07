@@ -362,9 +362,7 @@ impl eframe::App for SetupApp {
                     } else {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new("PawnIO ist nicht installiert. Ohne den Treiber fehlen CPU-Temperatur und CPU-Watt; alles andere funktioniert.").color(egui::Color32::from_rgb(200, 140, 0)));
-                            if ui.link("PawnIO herunterladen (pawnio.eu)").clicked() {
-                                winutil::shell_open("https://pawnio.eu/");
-                            }
+                            crate::ui::pawnio_install_button(ui);
                         });
                     }
                     ui.add_space(14.0);

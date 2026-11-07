@@ -6,6 +6,13 @@ Derselbe Text erscheint auf GitHub beim Release und in TaskPulse unter Einstellu
 
 ## Unveröffentlicht
 
+## 0.1.9 – 2026-11-07
+
+- Neuer Knopf **„PawnIO installieren“** (unter *Leistung → CPU*, in den *Einstellungen* und im Installer, solange PawnIO fehlt). Ohne PawnIO gibt es keine CPU-Temperatur, keine CPU-Watt und keine Temperatur der RAM-Riegel. TaskPulse lädt den offiziellen Installer vom PawnIO-Entwickler (github.com/namazso/PawnIO.Setup), prüft seine digitale Signatur und startet ihn erst danach; Windows fragt dabei nach Adminrechten. Nach der Installation werden die Werte sofort gelesen, ohne Neustart von TaskPulse (falls es mit Adminrechten läuft).
+- Virenscanner: Die EXE enthält jetzt Versionsangaben (Name, Beschreibung, Version, Hersteller, Link zum Quellcode – sichtbar unter *Eigenschaften → Details*). Ohne diese Angaben stuften manche Virenscanner TaskPulse fälschlich als verdächtig ein.
+- Grafikkarte (NVIDIA RTX 30 und RTX 40): Hot-Spot und Speichertemperatur werden jetzt angezeigt. Sie kommen direkt vom NVIDIA-Treiber und brauchen **keine Adminrechte**; die Speichertemperatur gibt es dort bei Karten mit GDDR6X-Speicher. Bei RTX 50 bleibt es wie bisher (mit Adminrechten und PawnIO).
+- Grafikkarte: Hot-Spot und Speichertemperatur (über PawnIO) fehlten, wenn die CPU-Sensoren nicht starteten – zum Beispiel auf manchen Intel-PCs. Beides ist jetzt unabhängig voneinander. Das gilt genauso für die Temperatur der RAM-Riegel.
+- Intel-CPUs: Temperatur und Watt werden jetzt einzeln gelesen. Fehlt einer der Werte, wird der andere trotzdem angezeigt (früher fiel dann beides weg). Ins Protokoll und in den Diagnosebericht kommen jetzt die genauen Rohwerte und Fehlercodes, damit sich Probleme auf Intel-PCs aus der Ferne finden lassen.
 - Leistung → Grafikkarte: Bei schmalerem Fenster wurden die Werte unter dem Graphen rechts abgeschnitten (z. B. „Leistungsaufnahme“). Was nicht mehr in die Zeile passt, rutscht jetzt in die nächste Zeile.
 - Prozesse: Bei Prozessgruppen ohne Grafikspeicher stand „-0,00 GB“ bzw. „-0 %“ beim VRAM. Jetzt steht dort „0,00 GB“ bzw. „0 %“.
 - GitHub-Seite: neue Bilder von allen Seiten (Prozesse, CPU, Arbeitsspeicher, Grafikkarte, Datenträger, Autostart, Benchmark, Einstellungen).

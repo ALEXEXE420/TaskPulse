@@ -1,6 +1,6 @@
 [package]
 name = "taskpulse"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 description = "TaskPulse - erweiterter Task-Manager mit GPU-Werten und Taskleisten-Anzeige"
 build = "build.rs"
@@ -28,6 +28,10 @@ features = [
   "Foundation_Numerics",
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_WinTrust",
+  "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Catalog",
+  "Win32_Security_Cryptography_Sip",
   "Win32_System_Performance",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",

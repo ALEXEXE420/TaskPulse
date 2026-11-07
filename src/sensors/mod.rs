@@ -3,6 +3,7 @@
 pub mod cpu;
 pub mod cputemp;
 pub mod dimm;
+pub mod nvapi;
 pub mod nvtemp;
 pub mod spec;
 pub mod startup;
@@ -47,9 +48,14 @@ pub struct BasicSensors {
     ram_tried: bool,
     /// Timings ändern sich im Betrieb nicht → einmal lesen
     ram_timings: Option<Vec<dimm::Timings>>,
-    /// NVIDIA: Hot-Spot und Speichertemperatur über PawnIO
+    /// NVIDIA: Hot-Spot und Speichertemperatur über PawnIO (Adminrechte)
     nvreg: Option<nvtemp::NvRegTemps>,
     nvreg_tried: bool,
+    /// NVIDIA: Hot-Spot und Speichertemperatur über NVAPI (RTX 30/40, ohne Adminrechte)
+    nvapi: Option<nvapi::NvApiTemps>,
+    nvapi_tried: bool,
+    /// PCI-Kennung der NVIDIA-Karte (NVML) und ob es eine RTX 50 oder neuer ist; einmal ermittelt
+    nv_bus: Option<Option<(String, bool)>>,
     net: net::Net,
     gpu: gpu::Gpu,
 }
@@ -57,12 +63,19 @@ pub struct BasicSensors {
 impl BasicSensors {
     pub fn new(cfg: &Config) -> BasicSensors {
         let (temp, temp_status) = open_temp(cfg);
-        BasicSensors { cpu: cpu::Cpu::new(), temp, temp_status, temp_retry: 0, ram: None, ram_tried: false, ram_timings: None, nvreg: None, nvreg_tried: false, net: net::Net::new(), gpu: gpu::Gpu::new(&cfg.gpu_adapter) }
+        BasicSensors { cpu: cpu::Cpu::new(), temp, temp_status, temp_retry: 0, ram: None, ram_tried: false, ram_timings: None, nvreg: None, nvreg_tried: false, nvapi: None, nvapi_tried: false, nv_bus: None, net: net::Net::new(), gpu: gpu::Gpu::new(&cfg.gpu_adapter) }
     }
 
     pub fn sample(&mut self, cfg: &Config) -> Basic {
         if self.gpu.wanted() != cfg.gpu_adapter {
             self.gpu = gpu::Gpu::new(&cfg.gpu_adapter);
+        }
+        // PawnIO wurde gerade über den Knopf installiert: sofort neu versuchen (sonst erst nach 60 s)
+        #[cfg(windows)]
+        if crate::pawnio_setup::take_just_installed() && self.temp.is_none() {
+            self.temp_status = cputemp::TempStatus::Disabled;
+            self.nvreg_tried = false;
+            self.ram_tried = false;
         }
         // PawnIO bei Einstellungsänderung nachladen bzw. freigeben
         if !cfg.use_pawnio && self.temp.is_some() {
@@ -84,20 +97,37 @@ impl BasicSensors {
         let line_up_pct = net.up_bps.and_then(|b| format::line_usage_pct(b, cfg.line_up_mbit));
         let line_down_pct = net.down_bps.and_then(|b| format::line_usage_pct(b, cfg.line_down_mbit));
         let mut gpu = self.gpu.sample();
-        // NVIDIA: Hot-Spot und Speichertemperatur (nur mit PawnIO/Adminrechten; sonst wird nichts versucht)
-        let pawnio_ok = cfg.use_pawnio && self.temp.is_some();
+        // NVIDIA: Hot-Spot und Speichertemperatur
+        // - NVAPI (RTX 30/40): ohne Adminrechte
+        // - PawnIO-Modul „Nvidia“ (Speicher RTX 30–50, Hot-Spot RTX 50): mit Adminrechten. Unabhängig davon,
+        //   ob die CPU-Sensoren geklappt haben (früher fehlten die GPU-Werte, wenn z. B. die Intel-CPU scheiterte).
+        let is_nv = gpu.source.as_deref().map(|s| s.contains("NVML")).unwrap_or(false);
+        if is_nv && self.nv_bus.is_none() {
+            self.nv_bus = Some(nvgpu::NvGpu::new().and_then(|n| Some((n.bus_id()?, n.blackwell_or_newer()))));
+        }
+        let (bus, newer) = match self.nv_bus.clone().flatten() {
+            Some((b, n)) => (Some(b), n),
+            None => (None, false),
+        };
+        if is_nv && !self.nvapi_tried {
+            self.nvapi_tried = true;
+            // RTX 50: NVAPI meldet dort keinen Hot-Spot mehr → nur PawnIO
+            if !newer {
+                self.nvapi = bus.as_deref().and_then(nvtemp::parse_bus_id).and_then(|(b, _, _)| nvapi::NvApiTemps::open(b));
+            }
+        }
+        let pawnio_ok = cfg.use_pawnio && (self.temp.is_some() || crate::winutil::is_elevated());
         if !pawnio_ok {
             self.nvreg = None;
             self.nvreg_tried = false;
-        } else if !self.nvreg_tried && gpu.source.as_deref().map(|s| s.contains("NVML")).unwrap_or(false) {
+        } else if !self.nvreg_tried && is_nv {
             self.nvreg_tried = true;
-            self.nvreg = nvgpu::NvGpu::new().and_then(|n| n.bus_id()).and_then(|id| nvtemp::NvRegTemps::open(&id));
+            self.nvreg = bus.as_deref().and_then(nvtemp::NvRegTemps::open);
         }
-        if let Some(r) = &self.nvreg {
-            let t = r.read();
-            gpu.hotspot_c = t.hotspot_c;
-            gpu.mem_temp_c = t.mem_max_c;
-        }
+        let reg = self.nvreg.as_ref().map(|r| r.read()).unwrap_or_default();
+        let (api_hot, api_mem) = self.nvapi.as_ref().map(|a| a.read()).unwrap_or((None, None));
+        gpu.hotspot_c = reg.hotspot_c.or(api_hot);
+        gpu.mem_temp_c = reg.mem_max_c.or(api_mem);
         Basic {
             cpu,
             cpu_freq_mhz,
@@ -133,7 +163,7 @@ impl BasicSensors {
 
     /// Temperatur der Speicherriegel (SMBus, nur mit PawnIO; abschaltbar).
     pub fn dimm_temps(&mut self, cfg: &Config) -> Vec<dimm::DimmTemp> {
-        let allowed = cfg.ram_sensors && (cfg!(not(windows)) || (cfg.use_pawnio && self.temp.is_some()));
+        let allowed = cfg.ram_sensors && (cfg!(not(windows)) || (cfg.use_pawnio && (self.temp.is_some() || crate::winutil::is_elevated())));
         if !allowed {
             self.ram = None;
             self.ram_tried = false;

@@ -1015,7 +1015,13 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                         stat(ui, "Threads", threads.to_string());
                         stat(ui, "Handles", handles.to_string());
                     });
-                    ui.label(RichText::new(format!("Temperatur: {}", b.cpu_temp_status)).small().weak());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(format!("Temperatur: {}", b.cpu_temp_status)).small().weak());
+                        // Ohne PawnIO gibt es keine CPU-Temperatur/-Watt (und keine RAM-Temperaturen) – direkt zum Download
+                        if b.cpu_temp_status.contains("pawnio.eu") || crate::ui::pawnio_state_done() {
+                            crate::ui::pawnio_install_button(ui);
+                        }
+                    });
                     spec_view(ui, w, "cpu", &f.cpu_spec, C_CPU);
                 }
                 Item::Mem => {
@@ -1164,7 +1170,7 @@ pub fn show(app: &mut TaskPulseApp, ui: &mut egui::Ui) {
                     if b.gpu.hotspot_c.is_none() && b.gpu.mem_temp_c.is_none() && b.gpu.source.as_deref().map(|s| s.contains("NVML")).unwrap_or(false) {
                         ui.label(
                             RichText::new(if cfg!(windows) {
-                                "Hot-Spot (RTX 50) und Speichertemperatur (RTX 30–50) gibt es nur mit Adminrechten und PawnIO – NVIDIA meldet sie nicht über die offizielle Schnittstelle."
+                                "Hot-Spot und Speichertemperatur: RTX 30/40 meldet der Treiber selbst (Speicher nur bei GDDR6X), RTX 50 nur mit Adminrechten und PawnIO. Ältere Karten haben diese Sensoren nicht."
                             } else {
                                 "Hot-Spot und Speichertemperatur meldet der NVIDIA-Treiber unter Linux nicht."
                             })

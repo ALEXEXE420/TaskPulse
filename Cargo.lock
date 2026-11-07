@@ -3069,7 +3069,7 @@ dependencies = [
 
 [[package]]
 name = "taskpulse"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "eframe",
  "egui_extras",
